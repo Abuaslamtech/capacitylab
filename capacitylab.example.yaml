@@ -1,0 +1,75 @@
+version: "1"
+
+# Target Application Definition
+application:
+  name: example-service
+  url: http://localhost:3000
+  startup:
+    compose_file: ./docker-compose.yml
+    wait_for_health: true
+    timeout: 60s
+
+# Controlled Service Resource Matrix
+services:
+  api:
+    container: example-api
+    test_matrix:
+      cpu: ["0.5", "1.0", "2.0"]
+      memory: ["512MB", "1GB", "2GB"]
+
+  postgres:
+    container: example-postgres
+    dsn: "postgres://postgres:postgres@localhost:5432/app_db?sslmode=disable"
+    max_connections: 100
+
+  redis:
+    container: example-redis
+    addr: "localhost:6379"
+
+# Workload Generation Parameters
+workload:
+  type: step-ramp
+  start_users: 10
+  max_users: 1000
+  step: 50
+  step_duration: 45s
+  warmup_duration: 20s
+  pacing:
+    think_time_min: 200ms
+    think_time_max: 800ms
+
+# Saturation Breaking Criteria (SLAs)
+thresholds:
+  max_cpu_percent: 85
+  max_memory_percent: 80
+  max_p95_latency_ms: 250
+  max_error_rate_percent: 1.0
+  max_cpu_throttle_percent: 15
+
+# Realistic Weighted User Journeys
+scenarios:
+  - name: browse_catalog
+    weight: 40
+    flow:
+      - get: /api/v1/health
+      - get: /api/v1/products?limit=20
+      - get: /api/v1/categories
+
+  - name: checkout_order
+    weight: 40
+    flow:
+      - post:
+          path: /api/v1/cart
+          body:
+            product_id: "prod-101"
+            quantity: 1
+      - post:
+          path: /api/v1/checkout
+          body:
+            payment_method: "test"
+
+  - name: user_account_sync
+    weight: 20
+    flow:
+      - get: /api/v1/profile
+      - get: /api/v1/orders/recent

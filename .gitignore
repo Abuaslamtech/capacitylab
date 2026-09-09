@@ -1,0 +1,15 @@
+# Binaries
+bin/
+dist/
+capacitylab
+
+# Test artifacts & generated reports
+*.html
+*.json
+!capacitylab.example.yaml
+.capacitylab/
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
