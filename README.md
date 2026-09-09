@@ -22,6 +22,7 @@
 9. [User Experience: Terminal, HTML Report & Dashboard](#9-user-experience-terminal-html-report--dashboard)
 10. [Step-by-Step Implementation Roadmap](#10-step-by-step-implementation-roadmap)
 11. [Verification & Acceptance Criteria for V1](#11-verification--acceptance-criteria-for-v1)
+12. [Technical Decisions: What We Build vs. What We Use](ARCHITECTURE.md)
 
 ---
 
