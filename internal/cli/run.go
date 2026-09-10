@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Abuaslamtech/capacitylab/internal/analyzer"
 	"github.com/Abuaslamtech/capacitylab/internal/config"
 	"github.com/Abuaslamtech/capacitylab/internal/engine"
 	"github.com/Abuaslamtech/capacitylab/internal/load"
@@ -117,6 +118,9 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 				cfg.Application.URL,
 				cfg.Services.API.Container,
 				"Multi-Tier Sizing Completed",
+				"Review the matrix table below to select optimal tier.",
+				nil,
+				nil,
 				cfg.Workload.MaxUsers,
 				maxVUs,
 				sustVUs,
@@ -149,15 +153,18 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		if err != nil {
 			fmt.Printf("⚠️  Warmup warning: %v\n", err)
 		}
-		fmt.Println("   ✓ Warmup complete! Caches and sockets primed.\n")
+		fmt.Println("   ✓ Warmup complete! Caches and sockets primed.")
+		fmt.Println()
 
 		// 2. Progressive Ramping Stages
 		currentUsers := cfg.Workload.StartUsers
+		classifier := analyzer.NewClassifier(cfg.Thresholds)
+		var finalReport analyzer.BottleneckReport
+
 		stageStepDuration := 6 * time.Second
 
 		var (
 			maxObservedUsers = 0
-			saturationReason = ""
 			breached         = false
 			recordedStages   []report.StageData
 		)
@@ -168,6 +175,16 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 
 			var peakCPU float64
 			var peakMem float64
+			var latestContainerMetrics runtime.ContainerMetrics
+			var latestPGMetrics *monitor.PostgresMetrics
+			var latestRedisMetrics *monitor.RedisMetrics
+
+			baselineMetrics, _ := dockerClient.GetMetrics(ctx, containerName)
+			var baselineThrottled uint64
+			if baselineMetrics != nil {
+				baselineThrottled = baselineMetrics.ThrottledPeriods
+			}
+
 			sampleDone := make(chan bool)
 
 			go func() {
@@ -179,13 +196,14 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 						return
 					case <-ticker.C:
 						metrics, err := dockerClient.GetMetrics(ctx, containerName)
-						if err == nil {
+						if err == nil && metrics != nil {
 							if metrics.CPUPercent > peakCPU {
 								peakCPU = metrics.CPUPercent
 							}
 							if metrics.MemoryUsedMB > peakMem {
 								peakMem = metrics.MemoryUsedMB
 							}
+							latestContainerMetrics = *metrics
 						}
 						// Harvest DB metrics if available
 						if pgMonitor != nil {
@@ -195,6 +213,7 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 								dbTelemetry.PostgresMax = pgMetrics.MaxConnections
 								dbTelemetry.PostgresCacheHit = pgMetrics.CacheHitRatio
 								dbTelemetry.PostgresLocks = pgMetrics.WaitingLocks
+								latestPGMetrics = pgMetrics
 							}
 						}
 						if redisMonitor != nil {
@@ -204,6 +223,7 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 								dbTelemetry.RedisConnected = rMetrics.ConnectedClients
 								dbTelemetry.RedisHitRatio = rMetrics.HitRatio
 								dbTelemetry.RedisInstantaneous = rMetrics.InstantaneousOps
+								latestRedisMetrics = rMetrics
 							}
 						}
 					}
@@ -216,6 +236,18 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			if err != nil {
 				fmt.Printf("   ❌ Stage error: %v\n", err)
 				break
+			}
+
+			if latestContainerMetrics.ThrottledPeriods >= baselineThrottled {
+				latestContainerMetrics.ThrottledPeriods -= baselineThrottled
+			} else {
+				latestContainerMetrics.ThrottledPeriods = 0
+			}
+
+			latestContainerMetrics.CPUPercent = peakCPU
+			latestContainerMetrics.MemoryUsedMB = peakMem
+			if latestContainerMetrics.MemoryLimitMB > 0 {
+				latestContainerMetrics.MemoryPercent = (peakMem / latestContainerMetrics.MemoryLimitMB) * 100
 			}
 
 			recordedStages = append(recordedStages, report.StageData{
@@ -233,21 +265,36 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			fmt.Printf("   📊 RPS: %-6.0f | p95: %-5.1fms | API CPU: %-4.1f%% | RAM: %-5.1fMB | Errors: %.1f%%\n",
 				metrics.RPS, metrics.P95Ms, peakCPU, peakMem, metrics.ErrorPercent)
 
-			// 3. Evaluate SLA thresholds
-			if peakCPU > cfg.Thresholds.MaxCPUPercent {
-				saturationReason = fmt.Sprintf("API CPU exceeded threshold (%.1f%% > %.0f%%)", peakCPU, cfg.Thresholds.MaxCPUPercent)
-				breached = true
-			} else if metrics.P95Ms > cfg.Thresholds.MaxP95LatencyMs {
-				saturationReason = fmt.Sprintf("p95 latency breached SLA (%.1fms > %.0fms)", metrics.P95Ms, cfg.Thresholds.MaxP95LatencyMs)
-				breached = true
-			} else if metrics.ErrorPercent > cfg.Thresholds.MaxErrorRatePercent {
-				saturationReason = fmt.Sprintf("Error rate exceeded threshold (%.1f%% > %.1f%%)", metrics.ErrorPercent, cfg.Thresholds.MaxErrorRatePercent)
-				breached = true
+			// 3. Evaluate Cross-Service Root-Cause Classifier
+			snap := analyzer.StateSnapshot{
+				LoadMetrics:  *metrics,
+				APIMetrics:   latestContainerMetrics,
+				PGMetrics:    latestPGMetrics,
+				RedisMetrics: latestRedisMetrics,
 			}
 
-			if breached {
+			diag := classifier.Diagnose(snap)
+			finalReport = diag
+
+			if diag.HasBreach {
+				breached = true
 				fmt.Printf("\n🛑 SATURATION BREACH DETECTED at %d users!\n", currentUsers)
-				fmt.Printf("   Cause: %s\n\n", saturationReason)
+				fmt.Printf("   Primary Bottleneck: [%s] %s\n", diag.Primary.Severity, diag.Primary.Component)
+				fmt.Printf("   Diagnosis:          %s\n", diag.Primary.Summary)
+				fmt.Printf("   Actionable Fix:     %s\n", diag.Primary.Remediation)
+				if len(diag.Secondary) > 0 {
+					fmt.Println("\n   ⚠️  Secondary Warnings:")
+					for _, sec := range diag.Secondary {
+						fmt.Printf("     • [%s] %s: %s\n", sec.Severity, sec.Component, sec.Summary)
+					}
+				}
+				if len(diag.NonLimiting) > 0 {
+					fmt.Println("\n   ✓ Non-Limiting Systems:")
+					for _, nl := range diag.NonLimiting {
+						fmt.Printf("     ✓ %s\n", nl)
+					}
+				}
+				fmt.Println()
 				break
 			}
 
@@ -273,14 +320,47 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		fmt.Printf("Recommended Sustainable Load:    ~%d concurrent users (30%% safety buffer)\n\n", sustainableCapacity)
 
 		if breached {
-			fmt.Printf("Primary Bottleneck:              %s\n", saturationReason)
+			fmt.Printf("Primary Bottleneck:              [%s] %s\n", finalReport.Primary.Severity, finalReport.Primary.Component)
+			fmt.Printf("Diagnosis:                       %s\n", finalReport.Primary.Summary)
+			fmt.Printf("Actionable Fix:                  %s\n", finalReport.Primary.Remediation)
+			if len(finalReport.Secondary) > 0 {
+				fmt.Println("\nSecondary Warnings:")
+				for _, sec := range finalReport.Secondary {
+					fmt.Printf("  • [%s] %s: %s\n", sec.Severity, sec.Component, sec.Summary)
+				}
+			}
+			if len(finalReport.NonLimiting) > 0 {
+				fmt.Println("\nHealthy & Non-Limiting Systems:")
+				for _, nl := range finalReport.NonLimiting {
+					fmt.Printf("  ✓ %s\n", nl)
+				}
+			}
 		} else {
 			fmt.Println("Primary Bottleneck:              None detected within tested range!")
+			if len(finalReport.NonLimiting) > 0 {
+				fmt.Println("\nHealthy & Non-Limiting Systems:")
+				for _, nl := range finalReport.NonLimiting {
+					fmt.Printf("  ✓ %s\n", nl)
+				}
+			}
 		}
 
 		fmt.Println("\nRecommended Sizing for Current Load:")
 		fmt.Printf("  • %s Container: 1.0 vCPU, 512 MB RAM\n", containerName)
 		fmt.Println("═════════════════════════════════════════════════════════════")
+
+		// Prepare Report Data
+		var secondaryList []string
+		for _, sec := range finalReport.Secondary {
+			secondaryList = append(secondaryList, fmt.Sprintf("%s: %s (Fix: %s)", sec.Component, sec.Summary, sec.Remediation))
+		}
+
+		bottleneckSummary := finalReport.Primary.Summary
+		bottleneckFix := finalReport.Primary.Remediation
+		if !breached {
+			bottleneckSummary = "None detected within tested range"
+			bottleneckFix = "System is operating comfortably within current hardware parameters."
+		}
 
 		// Generate HTML Report
 		err = report.GenerateHTML(
@@ -288,7 +368,10 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			cfg.Application.Name,
 			cfg.Application.URL,
 			containerName,
-			saturationReason,
+			bottleneckSummary,
+			bottleneckFix,
+			secondaryList,
+			finalReport.NonLimiting,
 			cfg.Workload.MaxUsers,
 			maxObservedUsers,
 			sustainableCapacity,

@@ -13,3 +13,6 @@ capacitylab
 .DS_Store
 .vscode/
 .idea/
+.agents/
+agent/
+.claude/

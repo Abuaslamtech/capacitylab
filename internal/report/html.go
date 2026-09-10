@@ -47,29 +47,33 @@ type DatabaseTelemetry struct {
 
 // ReportData represents everything needed to render the interactive dashboard
 type ReportData struct {
-	AppName             string
-	TargetURL           string
-	ContainerName       string
-	GeneratedAt         string
-	TargetVUs           int
-	MaxObservedVUs      int
-	SustainableVUs      int
-	PrimaryBottleneck   string
-	Stages              []StageData
-	DB                  DatabaseTelemetry
-	MatrixTiers         []TierData
-	HasMatrix           bool
-	ChartLabelsJSON     template.JS
-	ChartVUsJSON        template.JS
-	ChartRPSJSON        template.JS
-	ChartP95JSON        template.JS
-	ChartCPUJSON        template.JS
+	AppName              string
+	TargetURL            string
+	ContainerName        string
+	GeneratedAt          string
+	TargetVUs            int
+	MaxObservedVUs       int
+	SustainableVUs       int
+	PrimaryBottleneck    string
+	BottleneckAction     string
+	SecondaryBottlenecks []string
+	NonLimitingServices  []string
+	Stages               []StageData
+	DB                   DatabaseTelemetry
+	MatrixTiers          []TierData
+	HasMatrix            bool
+	ChartLabelsJSON      template.JS
+	ChartVUsJSON         template.JS
+	ChartRPSJSON         template.JS
+	ChartP95JSON         template.JS
+	ChartCPUJSON         template.JS
 }
 
 // GenerateHTML bakes the telemetry into a self-contained, interactive HTML file
 func GenerateHTML(
 	filepath string,
-	appName, targetURL, containerName, bottleneck string,
+	appName, targetURL, containerName, bottleneck, bottleneckAction string,
+	secondary []string, nonLimiting []string,
 	targetVUs, maxVUs, sustainableVUs int,
 	stages []StageData,
 	dbTele DatabaseTelemetry,
@@ -96,23 +100,26 @@ func GenerateHTML(
 	cpuJSON, _ := json.Marshal(cpu)
 
 	data := ReportData{
-		AppName:           appName,
-		TargetURL:         targetURL,
-		ContainerName:     containerName,
-		GeneratedAt:       time.Now().Format("Jan 02, 2006 • 15:04:05 MST"),
-		TargetVUs:         targetVUs,
-		MaxObservedVUs:    maxVUs,
-		SustainableVUs:    sustainableVUs,
-		PrimaryBottleneck: bottleneck,
-		Stages:            stages,
-		DB:                dbTele,
-		MatrixTiers:       matrixTiers,
-		HasMatrix:         len(matrixTiers) > 0,
-		ChartLabelsJSON:   template.JS(labelsJSON),
-		ChartVUsJSON:      template.JS(vusJSON),
-		ChartRPSJSON:      template.JS(rpsJSON),
-		ChartP95JSON:      template.JS(p95JSON),
-		ChartCPUJSON:      template.JS(cpuJSON),
+		AppName:              appName,
+		TargetURL:            targetURL,
+		ContainerName:        containerName,
+		GeneratedAt:          time.Now().Format("Jan 02, 2006 • 15:04:05 MST"),
+		TargetVUs:            targetVUs,
+		MaxObservedVUs:       maxVUs,
+		SustainableVUs:       sustainableVUs,
+		PrimaryBottleneck:    bottleneck,
+		BottleneckAction:     bottleneckAction,
+		SecondaryBottlenecks: secondary,
+		NonLimitingServices:  nonLimiting,
+		Stages:               stages,
+		DB:                   dbTele,
+		MatrixTiers:          matrixTiers,
+		HasMatrix:            len(matrixTiers) > 0,
+		ChartLabelsJSON:      template.JS(labelsJSON),
+		ChartVUsJSON:         template.JS(vusJSON),
+		ChartRPSJSON:         template.JS(rpsJSON),
+		ChartP95JSON:         template.JS(p95JSON),
+		ChartCPUJSON:         template.JS(cpuJSON),
 	}
 
 	tmpl, err := template.New("report").Parse(htmlTemplate)
@@ -239,8 +246,38 @@ const htmlTemplate = `<!DOCTYPE html>
       <div class="card">
         <div class="card-label">Primary Bottleneck</div>
         <div class="card-value val-red" style="font-size: 16px; line-height: 1.4; margin-top: 6px;">{{.PrimaryBottleneck}}</div>
+        {{if .BottleneckAction}}
+        <div class="card-sub" style="color: #cbd5e1; margin-top: 8px;"><strong>Fix:</strong> {{.BottleneckAction}}</div>
+        {{end}}
       </div>
     </div>
+
+    <!-- Full Diagnostic Breakdown (If secondary or non-limiting items exist) -->
+    {{if or .SecondaryBottlenecks .NonLimitingServices}}
+    <div class="card" style="margin-bottom: 32px;">
+      <div class="card-label" style="margin-bottom: 12px;">Full System Diagnostic Breakdown</div>
+      {{if .SecondaryBottlenecks}}
+      <div style="margin-bottom: 14px;">
+        <span style="font-size: 13px; color: var(--warning); font-weight: 600;">Secondary Constraints:</span>
+        <ul style="margin-left: 20px; font-size: 13px; color: var(--muted); margin-top: 4px;">
+          {{range .SecondaryBottlenecks}}
+          <li style="margin-bottom: 2px;">{{.}}</li>
+          {{end}}
+        </ul>
+      </div>
+      {{end}}
+      {{if .NonLimitingServices}}
+      <div>
+        <span style="font-size: 13px; color: var(--success); font-weight: 600;">Healthy & Non-Limiting Components:</span>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px;">
+          {{range .NonLimitingServices}}
+          <span class="badge" style="background: rgba(16, 185, 129, 0.1); color: var(--success); border-color: rgba(16, 185, 129, 0.2);">✓ {{.}}</span>
+          {{end}}
+        </div>
+      </div>
+      {{end}}
+    </div>
+    {{end}}
 
     <!-- Database Telemetry Section (If present) -->
     {{if or .DB.HasPostgres .DB.HasRedis}}
