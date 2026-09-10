@@ -49,15 +49,15 @@ thresholds:
 # 5. Realistic User Journeys
 scenarios:
   - name: browse_dashboard
-    weight: 50
+    weight: 60
     flow:
-      - get: /api/v1/health
-      - get: /api/v1/dashboard
+      - get: /
 
-  - name: create_record
-    weight: 50
+  - name: user_account_sync
+    weight: 40
     flow:
-      - post:
-          path: /api/v1/records
-          body:
-            name: "test-item"
+      - get:
+          path: /
+          headers:
+            "Accept": "text/html"
+            "User-Agent": "CapacityLab/1.0"

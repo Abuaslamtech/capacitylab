@@ -1,6 +1,7 @@
 package load
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"math/rand"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +38,8 @@ type Runner struct {
 	cfg        *config.Config
 	transport  *http.Transport
 	httpClient *http.Client
+	selector   *ScenarioSelector
+	baseURL    string
 }
 
 // NewRunner creates a load runner with connection pooling to prevent socket exhaustion (Trap 4)
@@ -44,7 +48,7 @@ func NewRunner(cfg *config.Config) *Runner {
 		MaxIdleConns:        2000,
 		MaxIdleConnsPerHost: 1000,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  false,
+		DisableCompression: false,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 	}
 
@@ -53,10 +57,15 @@ func NewRunner(cfg *config.Config) *Runner {
 		Timeout:   10 * time.Second,
 	}
 
+	selector, _ := NewScenarioSelector(cfg.Scenarios)
+	baseURL := strings.TrimRight(cfg.Application.URL, "/")
+
 	return &Runner{
 		cfg:        cfg,
 		transport:  transport,
 		httpClient: client,
+		selector:   selector,
+		baseURL:    baseURL,
 	}
 }
 
@@ -149,21 +158,62 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 }
 
 func (r *Runner) executeScenario(ctx context.Context) error {
-	// For V1, hit the base application URL
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.Application.URL, nil)
-	if err != nil {
-		return err
+	if r.selector == nil || len(r.selector.scenarios) == 0 {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode >= 500 {
+			return fmt.Errorf("server error: %d", resp.StatusCode)
+		}
+		return nil
 	}
 
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	// Pick scenario based on weight distribution
+	scenario := r.selector.Pick()
 
-	if resp.StatusCode >= 500 {
-		return fmt.Errorf("server error: %d", resp.StatusCode)
+	// Execute scenario flow steps sequentially
+	for _, step := range scenario.Steps {
+		fullURL := r.baseURL
+		if step.Path != "" {
+			if strings.HasPrefix(step.Path, "/") {
+				fullURL += step.Path
+			} else {
+				fullURL += "/" + step.Path
+			}
+		}
+
+		var bodyReader io.Reader
+		if len(step.Body) > 0 {
+			bodyReader = bytes.NewReader(step.Body)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, step.Method, fullURL, bodyReader)
+		if err != nil {
+			return err
+		}
+
+		for k, v := range step.Headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode >= 500 {
+			return fmt.Errorf("step %s %s error: %d", step.Method, step.Path, resp.StatusCode)
+		}
 	}
 
 	return nil
