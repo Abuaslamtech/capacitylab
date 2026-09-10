@@ -1,7 +1,6 @@
 package load
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -180,26 +179,23 @@ func (r *Runner) executeScenario(ctx context.Context) error {
 
 	// Execute scenario flow steps sequentially
 	for _, step := range scenario.Steps {
+		method, path, headers, bodyReader := step.ResolveExecution()
+
 		fullURL := r.baseURL
-		if step.Path != "" {
-			if strings.HasPrefix(step.Path, "/") {
-				fullURL += step.Path
+		if path != "" {
+			if strings.HasPrefix(path, "/") {
+				fullURL += path
 			} else {
-				fullURL += "/" + step.Path
+				fullURL += "/" + path
 			}
 		}
 
-		var bodyReader io.Reader
-		if len(step.Body) > 0 {
-			bodyReader = bytes.NewReader(step.Body)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, step.Method, fullURL, bodyReader)
+		req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
 		if err != nil {
 			return err
 		}
 
-		for k, v := range step.Headers {
+		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
 

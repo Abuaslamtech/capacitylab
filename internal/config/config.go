@@ -1,14 +1,114 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+var envPattern = regexp.MustCompile(`\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}`)
+
+// ExpandEnvWithDefaults replaces ${VAR} and ${VAR:-default} with environment values
+func ExpandEnvWithDefaults(input []byte) []byte {
+	return envPattern.ReplaceAllFunc(input, func(match []byte) []byte {
+		parts := envPattern.FindSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		varName := string(parts[1])
+		hasDefault := len(parts) >= 3 && parts[2] != nil
+		defaultVal := ""
+		if hasDefault {
+			defaultVal = string(parts[2])
+		}
+
+		if val, exists := os.LookupEnv(varName); exists && val != "" {
+			return []byte(val)
+		}
+		if hasDefault {
+			return []byte(defaultVal)
+		}
+		return []byte("")
+	})
+}
+
+// LoadDotEnv searches for and loads .env and .env.local files without overwriting existing environment variables
+func LoadDotEnv(dir string) {
+	candidates := []string{
+		filepath.Join(dir, ".env.local"),
+		filepath.Join(dir, ".env"),
+	}
+
+	for _, path := range candidates {
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if strings.HasPrefix(line, "export ") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+
+			// Strip quotes if present
+			if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
+				(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+				if len(val) >= 2 {
+					val = val[1 : len(val)-1]
+				}
+			}
+
+			if _, exists := os.LookupEnv(key); !exists {
+				_ = os.Setenv(key, val)
+			}
+		}
+		_ = file.Close()
+	}
+}
+
+// Load reads, interpolates environment variables, and parses a capacitylab.yaml file
+func Load(filepathStr string) (*Config, error) {
+	dir := filepath.Dir(filepathStr)
+	LoadDotEnv(dir)
+	if dir != "." {
+		LoadDotEnv(".")
+	}
+
+	data, err := os.ReadFile(filepathStr)
+	if err != nil {
+		return nil, fmt.Errorf("could not read file: %w", err)
+	}
+
+	interpolated := ExpandEnvWithDefaults(data)
+
+	var cfg Config
+	if err := yaml.Unmarshal(interpolated, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid YAML syntax: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
 
 // Config represents the complete capacitylab.yaml schema
 type Config struct {
@@ -83,24 +183,6 @@ type Scenario struct {
 
 type ScenarioStep map[string]interface{}
 
-// Load reads and parses a capacitylab.yaml file
-func Load(filepath string) (*Config, error) {
-	data, err := os.ReadFile(filepath)
-	if err != nil {
-		return nil, fmt.Errorf("could not read file: %w", err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("invalid YAML syntax: %w", err)
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-
-	return &cfg, nil
-}
 
 // Validate verifies that the configuration values are semantically sound
 func (c *Config) Validate() error {

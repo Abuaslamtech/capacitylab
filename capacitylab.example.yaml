@@ -1,9 +1,9 @@
 version: "1"
 
-# Target Application Definition
+# Target Application Definition (supports ${VAR:-default} and .env auto-loading)
 application:
-  name: example-service
-  url: http://localhost:3000
+  name: ${APP_NAME:-example-service}
+  url: ${API_URL:-http://localhost:3000}
   startup:
     compose_file: ./docker-compose.yml
     wait_for_health: true
@@ -12,19 +12,19 @@ application:
 # Controlled Service Resource Matrix
 services:
   api:
-    container: example-api
+    container: ${API_CONTAINER:-example-api}
     test_matrix:
       cpu: ["0.5", "1.0", "2.0"]
       memory: ["512MB", "1GB", "2GB"]
 
   postgres:
-    container: example-postgres
-    dsn: "postgres://postgres:postgres@localhost:5432/app_db?sslmode=disable"
+    container: ${PG_CONTAINER:-example-postgres}
+    dsn: ${POSTGRES_DSN:-postgres://postgres:postgres@localhost:5432/app_db?sslmode=disable}
     max_connections: 100
 
   redis:
-    container: example-redis
-    addr: "localhost:6379"
+    container: ${REDIS_CONTAINER:-example-redis}
+    addr: ${REDIS_ADDR:-localhost:6379}
 
 # Workload Generation Parameters
 workload:
@@ -32,11 +32,8 @@ workload:
   start_users: 10
   max_users: 1000
   step: 50
-  step_duration: 45s
-  warmup_duration: 20s
-  pacing:
-    think_time_min: 200ms
-    think_time_max: 800ms
+  step_duration: 30s
+  warmup_duration: 15s
 
 # Saturation Breaking Criteria (SLAs)
 thresholds:
@@ -44,9 +41,8 @@ thresholds:
   max_memory_percent: 80
   max_p95_latency_ms: 250
   max_error_rate_percent: 1.0
-  max_cpu_throttle_percent: 15
 
-# Realistic Weighted User Journeys
+# Realistic Weighted User Journeys (supports dynamic generators: {{$uuid}}, {{$timestamp}}, {{$random_int(min,max)}})
 scenarios:
   - name: browse_catalog
     weight: 40
@@ -60,13 +56,20 @@ scenarios:
     flow:
       - post:
           path: /api/v1/cart
+          headers:
+            X-Request-ID: "{{$uuid}}"
           body:
-            product_id: "prod-101"
+            product_id: "prod-{{$random_int(100,105)}}"
             quantity: 1
       - post:
           path: /api/v1/checkout
+          headers:
+            X-Request-ID: "{{$uuid}}"
+            Authorization: "Bearer ${AUTH_TOKEN:-dev-token}"
           body:
-            payment_method: "test"
+            order_id: "{{$uuid}}"
+            payment_method: "credit_card"
+            timestamp: "{{$timestamp}}"
 
   - name: user_account_sync
     weight: 20

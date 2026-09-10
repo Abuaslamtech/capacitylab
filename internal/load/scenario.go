@@ -2,20 +2,28 @@ package load
 
 import (
 	"bytes"
+	cryptoRand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Abuaslamtech/capacitylab/internal/config"
 )
 
+var randomIntPattern = regexp.MustCompile(`\{\{\$random_int\((\d+),(\d+)\)\}\}`)
+
 // ParsedStep represents a pre-compiled, allocation-free HTTP execution step
 type ParsedStep struct {
-	Method  string
-	Path    string
-	Headers map[string]string
-	Body    []byte
+	Method              string
+	Path                string
+	Headers             map[string]string
+	Body                []byte
+	HasDynamicVariables bool
 }
 
 // CompiledScenario represents a weighted user journey ready for execution
@@ -148,9 +156,83 @@ func extractPathAndDetails(val interface{}, parsed ParsedStep) (ParsedStep, erro
 				parsed.Headers["Content-Type"] = "application/json"
 			}
 		}
+
+		// Detect if step contains dynamic generator placeholders
+		hasDynamic := strings.Contains(parsed.Path, "{{$") || bytes.Contains(parsed.Body, []byte("{{$"))
+		for _, h := range parsed.Headers {
+			if strings.Contains(h, "{{$") {
+				hasDynamic = true
+				break
+			}
+		}
+		parsed.HasDynamicVariables = hasDynamic
 		return parsed, nil
 
 	default:
 		return parsed, fmt.Errorf("unsupported flow step format: %T", val)
 	}
+}
+
+// ResolveExecution returns the method, path, headers, and body for a single request invocation
+func (p *ParsedStep) ResolveExecution() (string, string, map[string]string, io.Reader) {
+	if !p.HasDynamicVariables {
+		var bodyReader io.Reader
+		if len(p.Body) > 0 {
+			bodyReader = bytes.NewReader(p.Body)
+		}
+		return p.Method, p.Path, p.Headers, bodyReader
+	}
+
+	resolvedPath := InterpolateDynamic(p.Path)
+	resolvedHeaders := make(map[string]string, len(p.Headers))
+	for k, v := range p.Headers {
+		resolvedHeaders[k] = InterpolateDynamic(v)
+	}
+
+	var bodyReader io.Reader
+	if len(p.Body) > 0 {
+		resolvedBody := []byte(InterpolateDynamic(string(p.Body)))
+		bodyReader = bytes.NewReader(resolvedBody)
+	}
+
+	return p.Method, resolvedPath, resolvedHeaders, bodyReader
+}
+
+// InterpolateDynamic evaluates runtime generator tokens in strings ({{$uuid}}, {{$timestamp}}, {{$random_int}})
+func InterpolateDynamic(input string) string {
+	if !strings.Contains(input, "{{$") {
+		return input
+	}
+
+	if strings.Contains(input, "{{$uuid}}") {
+		input = strings.ReplaceAll(input, "{{$uuid}}", generateUUID())
+	}
+	if strings.Contains(input, "{{$timestamp}}") {
+		input = strings.ReplaceAll(input, "{{$timestamp}}", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	}
+	if strings.Contains(input, "{{$random_int}}") {
+		input = strings.ReplaceAll(input, "{{$random_int}}", strconv.Itoa(rand.Intn(1000000)))
+	}
+
+	input = randomIntPattern.ReplaceAllStringFunc(input, func(m string) string {
+		matches := randomIntPattern.FindStringSubmatch(m)
+		if len(matches) == 3 {
+			min, err1 := strconv.Atoi(matches[1])
+			max, err2 := strconv.Atoi(matches[2])
+			if err1 == nil && err2 == nil && max >= min {
+				return strconv.Itoa(min + rand.Intn(max-min+1))
+			}
+		}
+		return m
+	})
+
+	return input
+}
+
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, _ = cryptoRand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

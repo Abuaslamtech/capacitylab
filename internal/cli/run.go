@@ -19,9 +19,15 @@ import (
 )
 
 var (
-	outputReport string
-	openBrowser  bool
-	runMatrix    bool
+	outputReport       string
+	openBrowser        bool
+	runMatrix          bool
+	overrideURL        string
+	overrideMaxUsers   int
+	overrideStartUsers int
+	overrideStep       int
+	overrideContainer  string
+	failOnRegression   bool
 )
 
 var runCmd = &cobra.Command{
@@ -36,6 +42,26 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		cfg, err := config.Load(configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Configuration error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if overrideURL != "" {
+			cfg.Application.URL = overrideURL
+		}
+		if overrideMaxUsers > 0 {
+			cfg.Workload.MaxUsers = overrideMaxUsers
+		}
+		if overrideStartUsers > 0 {
+			cfg.Workload.StartUsers = overrideStartUsers
+		}
+		if overrideStep > 0 {
+			cfg.Workload.Step = overrideStep
+		}
+		if overrideContainer != "" {
+			cfg.Services.API.Container = overrideContainer
+		}
+		if err := cfg.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Configuration error after flag overrides: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -475,6 +501,10 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 				cmp := history.Compare(*latestPrev, rec)
 				if cmp.IsRegression {
 					fmt.Printf("⚠️  Historical Regression: %s\n", cmp.RegressionItem)
+					if failOnRegression {
+						fmt.Fprintf(os.Stderr, "❌ Failing CI/CD build due to --fail-on-regression flag.\n")
+						os.Exit(1)
+					}
 				} else if cmp.CapacityDelta != 0 {
 					fmt.Printf("📈 Comparison to previous run: Sustainable capacity %+.1f%% (%d ➔ %d users)\n",
 						cmp.CapacityDelta, latestPrev.SustainableVUs, rec.SustainableVUs)
@@ -489,5 +519,11 @@ func init() {
 	runCmd.Flags().StringVarP(&outputReport, "output", "o", "capacity-report.html", "Path to output HTML report")
 	runCmd.Flags().BoolVar(&openBrowser, "open", false, "Automatically open report in browser when finished")
 	runCmd.Flags().BoolVarP(&runMatrix, "matrix", "m", false, "Run progressive load across configured CPU/RAM matrix tiers")
+	runCmd.Flags().StringVar(&overrideURL, "url", "", "Override application target URL")
+	runCmd.Flags().IntVar(&overrideMaxUsers, "max-users", 0, "Override maximum concurrent users")
+	runCmd.Flags().IntVar(&overrideStartUsers, "start-users", 0, "Override start concurrent users")
+	runCmd.Flags().IntVar(&overrideStep, "step", 0, "Override step increment for concurrent users")
+	runCmd.Flags().StringVar(&overrideContainer, "container", "", "Override API container name")
+	runCmd.Flags().BoolVar(&failOnRegression, "fail-on-regression", false, "Exit with code 1 if a capacity regression is detected")
 	rootCmd.AddCommand(runCmd)
 }
