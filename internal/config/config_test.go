@@ -252,4 +252,45 @@ scenarios:
 			t.Errorf("Expected workload type 'spike', got %s", cfg.Workload.Type)
 		}
 	})
+
+	t.Run("SafetyFactor and ErrorRatePct alias validation", func(t *testing.T) {
+		cfgFile := filepath.Join(tempDir, "safety.yaml")
+		yamlContent := `version: "1"
+application:
+  name: safety-app
+  url: http://localhost:8080
+workload:
+  type: step-ramp
+  start_users: 10
+  max_users: 50
+  step: 10
+thresholds:
+  max_p95_latency_ms: 500
+  max_error_rate_pct: 2.5
+  safety_factor: 0.80
+scenarios:
+  - name: health
+    weight: 100
+    flow:
+      - get: /health
+`
+		if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+			t.Fatalf("Failed to write yaml: %v", err)
+		}
+
+		cfg, err := Load(cfgFile)
+		if err != nil {
+			t.Fatalf("Failed to load safety config: %v", err)
+		}
+
+		if cfg.Thresholds.SafetyFactor != 0.80 {
+			t.Errorf("Expected safety_factor 0.80, got %f", cfg.Thresholds.SafetyFactor)
+		}
+		if cfg.Thresholds.MaxErrorRatePercent != 2.5 {
+			t.Errorf("Expected max_error_rate_percent to inherit from pct alias (2.5), got %f", cfg.Thresholds.MaxErrorRatePercent)
+		}
+		if cfg.Workload.StepDuration <= 0 {
+			t.Errorf("Expected step_duration to default to positive duration, got %v", cfg.Workload.StepDuration)
+		}
+	})
 }

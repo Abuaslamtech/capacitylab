@@ -45,7 +45,7 @@ type HardwareRecommendation struct {
 	OverprovisionWarning string
 }
 
-// ComputeRecommendation calculates production hardware recommendations based on test findings.
+// ComputeRecommendation calculates candidate starting hardware recommendations based on test findings.
 func ComputeRecommendation(
 	targetVUs int,
 	maxObservedVUs int,
@@ -54,25 +54,29 @@ func ComputeRecommendation(
 	pgActiveConns int,
 	pgMaxConns int,
 	redisMemMB float64,
+	safetyFactor float64,
 ) HardwareRecommendation {
-	headroom := 0.30
-	sustainable := int(float64(maxObservedVUs) * (1.0 - headroom))
+	if safetyFactor <= 0 || safetyFactor > 1.0 {
+		safetyFactor = 0.70
+	}
+	headroomPct := math.Round((1.0-safetyFactor)*1000.0) / 10.0
+	sustainable := int(float64(maxObservedVUs) * safetyFactor)
 	isRemote := (peakAPICPU == 0 && peakAPIMemMB == 0)
 
 	rec := HardwareRecommendation{
 		TargetVUs:         targetVUs,
 		MaxObservedVUs:    maxObservedVUs,
 		SustainableVUs:    sustainable,
-		SafetyHeadroomPct: 30.0,
+		SafetyHeadroomPct: headroomPct,
 		IsRemoteTarget:    isRemote,
 		APIPeakCPUPercent: peakAPICPU,
 		APIPeakMemoryMB:   peakAPIMemMB,
 	}
 
 	if isRemote {
-		rec.SizingRationale = fmt.Sprintf("Estimated for %d concurrent users (~%d sustainable). For container CPU/RAM cgroups, profile locally via Docker.", maxObservedVUs, sustainable)
+		rec.SizingRationale = fmt.Sprintf("Candidate estimate for %d concurrent users (~%d sustainable operating load with %.0f%% operational headroom). For container CPU/RAM cgroups, profile locally via Docker.", maxObservedVUs, sustainable, headroomPct)
 	} else {
-		rec.SizingRationale = fmt.Sprintf("Derived from measured container peaks (%.1f%% CPU, %.1f MB RAM) with 30%% safety headroom.", peakAPICPU, peakAPIMemMB)
+		rec.SizingRationale = fmt.Sprintf("Derived from measured container peaks (%.1f%% CPU, %.1f MB RAM) with %.0f%% operational headroom.", peakAPICPU, peakAPIMemMB, headroomPct)
 	}
 
 	// 1. Calculate API vCPU based on peak CPU and target ~60% load

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -41,13 +42,14 @@ var (
 	cleanupCompose     bool
 	jsonStdout         bool
 	outputJSONFile     string
+	overrideInsecure   bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the capacity benchmark against your backend",
 	Long: `Executes progressive step-ramping load against the target application,
-simultaneously scraping container CPU and memory metrics to detect the saturation point.`,
+simultaneously harvesting system and container telemetry to discover the measured capacity boundary.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		fmt.Fprint(os.Stdout, BrandBanner("Autonomous Benchmark Engine"))
 
@@ -72,9 +74,16 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		if overrideContainer != "" {
 			cfg.Services.API.Container = overrideContainer
 		}
+		if overrideInsecure {
+			cfg.Application.Insecure = true
+		}
 		if err := cfg.Validate(); err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Configuration error after flag overrides: %v\n", err)
 			os.Exit(1)
+		}
+
+		if cfg.Application.Insecure {
+			fmt.Printf("  %s %s\n\n", IconWarning(), Yellow("Insecure TLS: Certificate verification disabled via configuration/flag"))
 		}
 
 		dockerClient, err := runtime.NewClient()
@@ -319,7 +328,10 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		sent := sentinel.New()
 		var finalReport analyzer.BottleneckReport
 
-		stageStepDuration := 6 * time.Second
+		stageStepDuration := cfg.Workload.StepDuration
+		if stageStepDuration <= 0 {
+			stageStepDuration = 6 * time.Second
+		}
 
 		type stagePlan struct {
 			num      int
@@ -597,57 +609,71 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			maxObservedUsers = sp.vus
 		}
 
-		// 4. Print Capacity Plan Summary
-		fmt.Fprint(os.Stdout, BrandBanner("Capacity Planning Summary"))
+		// 4. Print Capacity Decision & Evidence Summary (Observed -> Inferred -> Recommended)
+		fmt.Fprint(os.Stdout, BrandBanner("Capacity Decision & Evidence Summary"))
 
 		if maxObservedUsers == 0 {
 			fmt.Printf("  %s %s\n\n", IconError(), Bold(Red("Target could not sustain baseline traffic.")))
 			return
 		}
 
-		sustainableCapacity := int(float64(maxObservedUsers) * 0.70)
-
-		fmt.Printf("  %-26s %s\n", Dim("Target Workload:"), Bold(fmt.Sprintf("%d concurrent users", cfg.Workload.MaxUsers)))
-		fmt.Printf("  %-26s %s\n", Dim("Max Observed Capacity:"), Bold(fmt.Sprintf("%d concurrent users", maxObservedUsers)))
-		fmt.Printf("  %-26s %s\n\n", Dim("Safe Production Load:"), Bold(BrightGreen(fmt.Sprintf("~%d concurrent users (30%% safety buffer)", sustainableCapacity))))
-
-		if breached {
-			fmt.Printf("  %-26s [%s] %s\n", Dim("Primary Bottleneck:"), Bold(Red(finalReport.Primary.Severity)), Bold(finalReport.Primary.Component))
-			fmt.Printf("  %-26s %s\n", Dim("Diagnosis:"), finalReport.Primary.Summary)
-			fmt.Printf("  %-26s %s\n", Dim("Actionable Fix:"), BrightCyan(finalReport.Primary.Remediation))
-			if len(finalReport.Secondary) > 0 {
-				fmt.Println("\n  " + Dim("Secondary Warnings:"))
-				for _, sec := range finalReport.Secondary {
-					fmt.Printf("    %s [%s] %s: %s\n", IconWarning(), sec.Severity, sec.Component, sec.Summary)
-				}
-			}
-			if len(finalReport.NonLimiting) > 0 {
-				fmt.Println("\n  " + Dim("Healthy & Non-Limiting Systems:"))
-				for _, nl := range finalReport.NonLimiting {
-					fmt.Printf("    %s %s\n", IconSuccess(), nl)
-				}
-			}
-		} else {
-			fmt.Printf("  %-26s %s\n", Dim("Primary Bottleneck:"), Green("None detected within tested range!"))
-			if len(finalReport.NonLimiting) > 0 {
-				fmt.Println("\n  " + Dim("Healthy & Non-Limiting Systems:"))
-				for _, nl := range finalReport.NonLimiting {
-					fmt.Printf("    %s %s\n", IconSuccess(), nl)
-				}
-			}
+		safetyFactor := cfg.Thresholds.SafetyFactor
+		if safetyFactor <= 0 || safetyFactor > 1.0 {
+			safetyFactor = 0.70
 		}
+		headroomPct := math.Round((1.0-safetyFactor)*1000.0) / 10.0
+		sustainableCapacity := int(float64(maxObservedUsers) * safetyFactor)
 
-		fmt.Println("\n  " + Dim("Local Host Sentinel Integrity:"))
+		// -------------------------------------------------------------
+		// [OBSERVED METRICS]
+		// -------------------------------------------------------------
+		fmt.Println("  " + Bold(Cyan("[OBSERVED METRICS]")))
+		fmt.Printf("    %-26s %s\n", Dim("Target Workload Tested:"), Bold(fmt.Sprintf("%d concurrent users", cfg.Workload.MaxUsers)))
+		fmt.Printf("    %-26s %s\n", Dim("Measured Capacity Boundary:"), Bold(fmt.Sprintf("%d concurrent users", maxObservedUsers)))
+		if len(recordedStages) > 0 {
+			lastStage := recordedStages[len(recordedStages)-1]
+			fmt.Printf("    %-26s %s\n", Dim("Boundary Throughput:"), fmt.Sprintf("%.1f req/s (p50: %.1fms, p95: %.1fms, errors: %.1f%%)",
+				lastStage.RPS, lastStage.P50Ms, lastStage.P95Ms, lastStage.ErrorPercent))
+		}
+		if containerName != "" && (latestContainerMetrics.CPUPercent > 0 || latestContainerMetrics.MemoryUsedMB > 0) {
+			fmt.Printf("    %-26s %s\n", Dim("Container Telemetry:"), fmt.Sprintf("Peak CPU: %.1f%%, Peak RAM: %.1f MB",
+				latestContainerMetrics.CPUPercent, latestContainerMetrics.MemoryUsedMB))
+		}
 		if len(allSentinelWarnings) == 0 {
-			fmt.Printf("    %s Zero host starvation (Peak Runner CPU: %.1f%%, RAM: %.1f MB, TIME_WAIT Sockets: %d)\n",
-				IconSuccess(), peakRunnerCPU, peakRunnerMem, peakTimeWaitSockets)
+			fmt.Printf("    %-26s %s\n", Dim("Runner Host Integrity:"), fmt.Sprintf("Zero runner starvation (Peak CPU: %.1f%%, RAM: %.1f MB, TIME_WAIT: %d)",
+				peakRunnerCPU, peakRunnerMem, peakTimeWaitSockets))
 		} else {
 			for _, w := range allSentinelWarnings {
-				fmt.Printf("    %s %s\n", IconWarning(), w)
+				fmt.Printf("    %-26s %s %s\n", Dim("Runner Host Warning:"), IconWarning(), Yellow(w))
 			}
 		}
+		fmt.Println()
 
-		// Compute Dynamic Production Hardware Recommendations (Section 8)
+		// -------------------------------------------------------------
+		// [INFERRED BOTTLENECK]
+		// -------------------------------------------------------------
+		fmt.Println("  " + Bold(Yellow("[INFERRED BOTTLENECK]")))
+		if breached {
+			fmt.Printf("    %-26s [%s] %s\n", Dim("Limiting Resource:"), Bold(Red(finalReport.Primary.Severity)), Bold(finalReport.Primary.Component))
+			fmt.Printf("    %-26s %s\n", Dim("Diagnostic Evidence:"), finalReport.Primary.Summary)
+			fmt.Printf("    %-26s %s\n", Dim("Actionable Fix:"), BrightCyan(finalReport.Primary.Remediation))
+			if len(finalReport.Secondary) > 0 {
+				for _, sec := range finalReport.Secondary {
+					fmt.Printf("    %-26s %s [%s] %s: %s\n", Dim("Secondary Warning:"), IconWarning(), sec.Severity, sec.Component, sec.Summary)
+				}
+			}
+		} else {
+			fmt.Printf("    %-26s %s\n", Dim("Limiting Resource:"), Green("None detected within tested workload"))
+			fmt.Printf("    %-26s %s\n", Dim("Diagnostic Evidence:"), "All requests complied with latency and error SLA thresholds.")
+		}
+		if len(finalReport.NonLimiting) > 0 {
+			fmt.Printf("    %-26s %s\n", Dim("Non-Limiting Systems:"), strings.Join(finalReport.NonLimiting, ", "))
+		}
+		fmt.Println()
+
+		// -------------------------------------------------------------
+		// [RECOMMENDED SIZING]
+		// -------------------------------------------------------------
 		hwRec := analyzer.ComputeRecommendation(
 			cfg.Workload.MaxUsers,
 			maxObservedUsers,
@@ -656,29 +682,34 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			dbTelemetry.PostgresActive,
 			dbTelemetry.PostgresMax,
 			dbTelemetry.RedisMemoryMB,
+			safetyFactor,
 		)
 
-		fmt.Printf("\n  %s %s\n", Bold("Recommended Production Sizing"), Dim(fmt.Sprintf("(%s - with 30%% safety buffer)", hwRec.APITierName)))
+		fmt.Println("  " + Bold(BrightGreen("[RECOMMENDED SIZING]")))
+		fmt.Printf("    %-26s %s\n", Dim("Safe Production Load:"),
+			Bold(BrightGreen(fmt.Sprintf("~%d concurrent users", sustainableCapacity)))+Dim(fmt.Sprintf(" (using %.2f safety factor / %.0f%% operational headroom)", safetyFactor, headroomPct)))
+		fmt.Printf("    %-26s %s\n", Dim("Candidate Starting Tier:"), Bold(fmt.Sprintf("%s", hwRec.APITierName)))
 		if hwRec.IsRemoteTarget {
-			fmt.Printf("    %s %-16s %s, %s %s\n", IconBullet(), Bold("Target Host:"), hwRec.APIVCPU, hwRec.APIRAM, Dim("(Estimated from traffic ceiling)"))
+			fmt.Printf("    %-26s %s, %s %s\n", Dim("Target Host Sizing:"), hwRec.APIVCPU, hwRec.APIRAM, Dim("(Estimated from traffic ceiling)"))
 		} else {
-			fmt.Printf("    %s %-16s %s, %s %s\n", IconBullet(), Bold("API Container:"), hwRec.APIVCPU, hwRec.APIRAM, Dim(fmt.Sprintf("(Peak CPU: %.1f%%, RAM: %.1f MB)", latestContainerMetrics.CPUPercent, latestContainerMetrics.MemoryUsedMB)))
+			fmt.Printf("    %-26s %s, %s %s\n", Dim("API Container Sizing:"), hwRec.APIVCPU, hwRec.APIRAM, Dim(fmt.Sprintf("(Peak CPU: %.1f%%, RAM: %.1f MB)", latestContainerMetrics.CPUPercent, latestContainerMetrics.MemoryUsedMB)))
 		}
 		if dbTelemetry.HasPostgres {
-			fmt.Printf("    %s %-16s %s, %s %s\n", IconBullet(), Bold("PostgreSQL:"), hwRec.PostgresVCPU, hwRec.PostgresRAM, Dim("("+hwRec.PostgresAdvice+")"))
+			fmt.Printf("    %-26s %s, %s %s\n", Dim("PostgreSQL Sizing:"), hwRec.PostgresVCPU, hwRec.PostgresRAM, Dim("("+hwRec.PostgresAdvice+")"))
 		}
 		if dbTelemetry.HasRedis {
-			fmt.Printf("    %s %-16s %s, %s\n", IconBullet(), Bold("Redis:"), hwRec.RedisVCPU, hwRec.RedisRAM)
+			fmt.Printf("    %-26s %s, %s\n", Dim("Redis Sizing:"), hwRec.RedisVCPU, hwRec.RedisRAM)
 		}
 
-		fmt.Printf("\n  %s\n", Bold("Multi-Cloud Cost Estimates:"))
-		fmt.Printf("    %s %-16s %s\n", IconArrow(), Dim("Budget VPS:"), hwRec.Costs.BudgetVPS)
-		fmt.Printf("    %s %-16s %s\n", IconArrow(), Dim("Managed PaaS:"), BrightCyan(hwRec.Costs.PaaS))
-		fmt.Printf("    %s %-16s %s\n", IconArrow(), Dim("Hyperscaler:"), Yellow(hwRec.Costs.Hyperscaler))
+		fmt.Printf("\n    %s\n", Bold("Multi-Cloud Cost Estimates:"))
+		fmt.Printf("      %s %-16s %s\n", IconArrow(), Dim("Budget VPS:"), hwRec.Costs.BudgetVPS)
+		fmt.Printf("      %s %-16s %s\n", IconArrow(), Dim("Managed PaaS:"), BrightCyan(hwRec.Costs.PaaS))
+		fmt.Printf("      %s %-16s %s\n", IconArrow(), Dim("Hyperscaler:"), Yellow(hwRec.Costs.Hyperscaler))
 
 		if hwRec.Overprovisioned {
-			fmt.Printf("\n  %s %s\n", IconWarning(), Yellow(hwRec.OverprovisionWarning))
+			fmt.Printf("\n    %s %s\n", IconWarning(), Yellow(hwRec.OverprovisionWarning))
 		}
+		fmt.Printf("\n    %s\n", Dim("Note: Tiers and costs are candidate starting estimates derived under test conditions. Calibrate against production."))
 		fmt.Println("  " + Gray("─────────────────────────────────────────────────────────────"))
 
 		// Prepare Report Data
@@ -717,6 +748,7 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			TotalCostEst:         hwRec.TotalCostEst,
 			OverprovisionWarning: hwRec.OverprovisionWarning,
 			IsRemoteTarget:       hwRec.IsRemoteTarget,
+			SafetyHeadroomPct:    hwRec.SafetyHeadroomPct,
 			SizingRationale:      hwRec.SizingRationale,
 			CostBudgetVPS:        hwRec.Costs.BudgetVPS,
 			CostPaaS:             hwRec.Costs.PaaS,
@@ -897,5 +929,6 @@ func init() {
 	runCmd.Flags().BoolVar(&jsonStdout, "json", false, "Output benchmark results as JSON to stdout")
 	runCmd.Flags().StringVar(&outputJSONFile, "output-json", "", "Path to write machine-readable JSON results file")
 	runCmd.Flags().StringVar(&outputJSONFile, "json-output", "", "Alias for --output-json")
+	runCmd.Flags().BoolVar(&overrideInsecure, "insecure", false, "Disable TLS certificate verification (useful for local self-signed endpoints)")
 	rootCmd.AddCommand(runCmd)
 }

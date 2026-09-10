@@ -71,6 +71,7 @@ If no run-id is specified, the most recent benchmark run is used.`,
 			0,
 			0,
 			0,
+			0.70,
 		)
 
 		sizing := report.SizingData{
@@ -88,6 +89,7 @@ If no run-id is specified, the most recent benchmark run is used.`,
 			TotalCostEst:         hwRec.TotalCostEst,
 			OverprovisionWarning: hwRec.OverprovisionWarning,
 			IsRemoteTarget:       hwRec.IsRemoteTarget,
+			SafetyHeadroomPct:    hwRec.SafetyHeadroomPct,
 			SizingRationale:      hwRec.SizingRationale,
 			CostBudgetVPS:        hwRec.Costs.BudgetVPS,
 			CostPaaS:             hwRec.Costs.PaaS,

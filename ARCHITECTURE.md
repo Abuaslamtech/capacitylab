@@ -1,8 +1,6 @@
 # CapacityLab Architecture & Technical Decisions
 
-> **Build vs. Use Strategy, Component Boundaries, and Architectural Rationale**
-
-This document details the architectural decisions for **CapacityLab**, outlining which existing open-source libraries and services are leveraged, which core components are built from scratch, and why.
+This document details the architectural decisions for **CapacityLab**, outlining which existing open-source libraries and services we use, which core components we build from scratch, and why.
 
 ---
 
@@ -16,7 +14,7 @@ CapacityLab is distributed as a **single, self-contained static binary** (writte
 ┌────────────────────────────────────────────────────────────────────────┐
 │                        CAPACITYLAB ARCHITECTURE                        │
 ├───────────────────────────────────┬────────────────────────────────────┤
-│       WHAT WE USE (LEVERAGED)     │       WHAT WE BUILD (CUSTOM)       │
+│       WHAT WE USE (EXISTING)      │       WHAT WE BUILD (CUSTOM)       │
 ├───────────────────────────────────┼────────────────────────────────────┤
 │ • Docker Go SDK (cgroups v2)      │ • Local Benchmarking Sentinel      │
 │ • k6 / Embedded Go HTTP Pool      │ • Saturation & Knee-Point Engine   │
@@ -35,19 +33,19 @@ CapacityLab is distributed as a **single, self-contained static binary** (writte
 | **CLI & Flags** | Command routing (`run`, `init`, `validate`, `report`) | **USE** | `github.com/spf13/cobra` | Battle-tested industry standard (used by Kubernetes `kubectl`, GitHub CLI). |
 | **Terminal UX** | Progress bars, tables, formatted terminal output | **USE** | `charmbracelet/lipgloss`, `tablewriter` | Lightweight ANSI styling without heavy terminal dependencies. |
 | **Container Control** | cgroup v2 limits (`cpu.cfs_quota_us`, `memory.max`) | **USE** | `github.com/docker/docker/client` | Official Docker Go SDK. Full kernel-level container lifecycle and resource management. |
-| **Traffic Engine** | HTTP load generation, virtual user scheduling | **USE** | Embedded `k6` wrapper / Native Go HTTP pool | Avoids building complex HTTP/2, TLS handshake, keep-alive, and connection pools from scratch. |
+| **Traffic Engine** | HTTP load generation, virtual user scheduling | **BUILD & USE** | Native Go Worker Pool (Primary) + Optional k6 Adapter | Built-in zero-dependency Go engine handles connection pooling, goroutine-per-VU scheduling, and dynamic session token extraction. Optional k6 adapter transpiles scenarios to JS. |
 | **PostgreSQL Stats** | Connection pool counts, cache hits, slow queries | **USE** | `github.com/jackc/pgx/v5` | Direct query to Postgres catalogs (`pg_stat_activity`, `pg_stat_database`) over standard SQL connection. No external agent needed. |
 | **Redis Stats** | Memory usage, ops/sec, evictions, clients | **USE** | `github.com/redis/go-redis/v9` | Direct inspection of Redis `INFO` over standard connection. |
 | **Interactive Charts** | Visual time-series curves in browser report | **USE** | `uPlot` or `Chart.js` (Embedded) | Inlined minified static JS file embedded directly into Go binary via `//go:embed`. Zero network access needed. |
 | **Local Host Sentinel** | Prevent test contamination & false bottlenecks | **BUILD** | `internal/sentinel` | Protects against same-machine CPU competition, cgroup quota throttling vs host starvation, and localhost socket exhaustion. |
-| **Saturation Engine** | Detect exact inflection points & SLA breaches | **BUILD** | `internal/analyzer/saturation.go` | Automated knee-point detection identifying where latency diverges from linear to exponential. |
-| **Bottleneck Classifier**| Pinpoint root causes across API, DB, and network | **BUILD** | `internal/analyzer/bottleneck.go` | Multi-dimensional correlation matrix ranking primary vs secondary constraints. |
-| **Sizing Recommender** | Calculate sustainable capacity & cloud tiers | **BUILD** | `internal/recommender` | Applies safety buffers (e.g. 30% headroom) and maps workload to standard server sizes. |
+| **Saturation Engine** | Detect capacity boundary & inflection points | **BUILD** | `internal/sentinel/sentinel.go` | Automated knee-point detection identifying where latency diverges from linear to exponential. |
+| **Bottleneck Classifier**| Pinpoint root causes across API, DB, and network | **BUILD** | `internal/analyzer/classifier.go` | Multi-dimensional correlation matrix ranking primary vs secondary constraints. |
+| **Sizing Recommender** | Calculate sustainable capacity & cloud tiers | **BUILD** | `internal/analyzer/recommender.go` | Applies configurable safety headroom (e.g. 30% buffer) and maps workload to candidate server sizes. |
 | **Report Bundler** | Generate standalone offline HTML reports | **BUILD** | `internal/report` | Embeds raw metrics into an interactive single-file HTML bundle. |
 
 ---
 
-## 3. Deep Dive: What We USE (Existing Services & Libraries)
+## 3. Existing Services and Libraries (What We Use)
 
 ### A. Container Runtime: Official Docker Go SDK
 * **Package:** `github.com/docker/docker/client`
@@ -58,20 +56,19 @@ CapacityLab is distributed as a **single, self-contained static binary** (writte
   3. Stream container resource metrics using `ContainerStats`.
   4. Query host daemon environment to detect if Docker is running natively on Linux or inside Docker Desktop (macOS/Windows hypervisor).
 
-### B. Traffic Simulation: Headless k6 & Embedded Go HTTP Pool
-* **Engine:** `k6` CLI (subprocess mode) + embedded Go HTTP worker fallback.
-* **Why We Don't Build It:** A reliable load generator requires:
-  * Connection pooling with aggressive keep-alive reuse.
-  * Robust TLS handshake caching.
-  * Configurable virtual user (VU) scheduling and pacing.
-  * Multi-scenario sequencing with dynamic response variable extraction.
-  Building this from scratch would turn the project into "yet another load testing tool" rather than a capacity planner.
-* **How We Use It:** CapacityLab generates execution scripts from `capacitylab.yaml`, triggers the runner, and captures structured telemetry over a local IPC stream or stdout.
+### B. Traffic Simulation: Native Go Worker Pool (Primary) + Optional Headless k6 Adapter
+* **Primary Engine:** Built-in connection-pooled Go HTTP worker pool (`internal/load/runner.go`).
+* **Why It Delivers Zero-Dependency Execution:**
+  * Runs 100% within the compiled Go binary without requiring NodeJS, Java, or external CLI installations.
+  * Handles keep-alive connection reuse, TLS session caching, pacing, and Goroutine-per-VU scheduling.
+  * Native session state isolation allows extracting authentication tokens from responses (e.g., JWTs) to authenticate subsequent step requests without external scripting runtimes.
+  * Includes Algorithm R reservoir sampling to strictly bound client-side memory during long endurance and soak runs.
+* **Optional k6 Adapter:** For teams with existing k6 investments, CapacityLab also includes an optional adapter (`--engine k6`, `internal/load/k6.go`) that transpiles `capacitylab.yaml` scenarios into k6 JavaScript execution scripts and runs k6 in headless subprocess mode when the `k6` binary is present in `$PATH`.
 
 ### C. Database Telemetry: Native Client Drivers
 * **Packages:** `github.com/jackc/pgx/v5`, `github.com/redis/go-redis/v9`
 * **Why We Don't Use Heavy Monitoring Agents (Prometheus / Datadog):**
-  * Installing Prometheus node exporters, Datadog agents, or OpenTelemetry collectors on local developer setups introduces massive friction.
+  * Installing Prometheus node exporters, Datadog agents, or OpenTelemetry collectors on local developer setups adds setup overhead and resource contention.
   * Instead, CapacityLab opens **a single read-only client connection** to Postgres and Redis to harvest system metrics directly.
 * **Metrics Scraped:**
   * **PostgreSQL:**
@@ -96,9 +93,9 @@ CapacityLab is distributed as a **single, self-contained static binary** (writte
 
 ---
 
-## 4. Deep Dive: What We BUILD (The Proprietary Engine)
+## 4. Custom Engine (What We Build)
 
-The custom software inside CapacityLab represents the **"Brain"**—the logic that transforms raw numbers into infrastructure decisions:
+CapacityLab's internal logic correlates raw metrics into infrastructure decisions:
 
 ```text
                                ┌────────────────────────┐
@@ -141,8 +138,8 @@ Running benchmarks on a developer's local machine introduces noise that invalida
 2. **Docker cgroup Throttling vs. Host Saturation:** Reads `/sys/fs/cgroup/cpu.stat` (`throttled_usec`). If the container is throttled by Docker while host CPU has idle capacity, it confirms the container hit its specific cgroup limit.
 3. **Ephemeral Port Exhaustion:** Monitors `TIME_WAIT` sockets on the loopback interface (`127.0.0.1`) to prevent artificial connection resets.
 
-### Component 2: Saturation & Knee-Point Evaluator (`internal/analyzer/saturation.go`)
-Instead of waiting for an application to crash completely with 100% 500 errors, the Saturation Engine detects the **knee-point**—the inflection point where response latency diverges from linear scaling into exponential queueing.
+### Component 2: Saturation & Knee-Point Evaluator (`internal/sentinel/sentinel.go`)
+Instead of waiting for an application to crash completely with 100% 500 errors, the Saturation Engine detects the **knee-point**: the inflection point where response latency diverges from linear scaling into exponential queueing.
 
 * **Algorithm:**
   * Tracks moving average and standard deviation of p95 latency across load steps:
@@ -153,7 +150,7 @@ Instead of waiting for an application to crash completely with 100% 500 errors, 
     * $\text{Error Rate} > 1.0\%$
   * The step is flagged as **Saturated**, and progressive ramping halts cleanly.
 
-### Component 3: Root-Cause Bottleneck Classifier (`internal/analyzer/bottleneck.go`)
+### Component 3: Root-Cause Bottleneck Classifier (`internal/analyzer/classifier.go`)
 When saturation is detected, the classifier evaluates cross-service telemetry to pinpoint the primary constraint:
 
 ```text
@@ -175,10 +172,10 @@ Saturation Detected
            └──► Primary: Redis Cache Eviction Pressure
 ```
 
-### Component 4: Sizing & Recommendation Engine (`internal/recommender`)
-Translates empirical test results into production hardware specifications:
-1. **Safety Margin Headroom:** Deducts a 30% safety buffer from the maximum observed capacity:
-   $$C_{\text{sustainable}} = C_{\text{max}} \times 0.70$$
+### Component 4: Sizing & Recommendation Engine (`internal/analyzer/recommender.go`)
+Translates empirical test results into candidate starting infrastructure recommendations:
+1. **Configurable Operational Headroom:** Applies an operational safety factor heuristic (default: 0.70 / 30% headroom) to the measured capacity boundary:
+   $$C_{\text{sustainable}} = C_{\text{max}} \times \text{safety\_factor}$$
 2. **Cloud Tier Mapping:** Compares observed resource consumption against standard VPS/Cloud instance specs:
    * Micro Tier: 0.5 vCPU, 512 MB RAM
    * Small Tier: 1.0 vCPU, 1 GB RAM
@@ -202,7 +199,7 @@ Translates empirical test results into production hardware specifications:
 * **Low Memory Footprint:** The CLI runner itself consumes $<25\text{MB}$ of RAM, minimizing interference with the local backend being benchmarked.
 
 ### Why Agentless Telemetry?
-* Requiring developers to install APM agents or sidecars kills adoption. By querying standard Docker stats APIs and database SQL catalogs, CapacityLab works out-of-the-box on existing Docker Compose setups.
+* Requiring developers to install APM agents or sidecars adds setup friction. By querying standard Docker stats APIs and database SQL catalogs, CapacityLab works out-of-the-box on existing Docker Compose setups.
 
 ### Why Local-First (No Mandatory Cloud)?
 * Developers run proprietary, unreleased software locally.

@@ -2,9 +2,9 @@
 
 # CapacityLab
 
-**Zero-agent capacity planning CLI for backend APIs and Docker stacks.**
+### Find your backend's real capacity before your users do.
 
-Simulate realistic workloads, detect the exact saturation point, pinpoint bottlenecks, and output production sizing recommendations with multi-cloud cost estimates.
+**Open-source CLI that load-tests your backend API, discovers its measured capacity boundary, classifies bottlenecks, and estimates candidate starting infrastructure.**
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -15,14 +15,56 @@ Simulate realistic workloads, detect the exact saturation point, pinpoint bottle
 
 ---
 
-## Quickstart (60 Seconds)
+## The CapacityLab Methodology: Observed vs. Inferred vs. Recommended
 
-### Option A: Test an API Right Now (Zero Config)
+Most load generators (k6, Locust, JMeter) stop at throughput charts and latency percentiles. CapacityLab answers the engineering question that follows: **"How much traffic can this backend safely carry under this workload, what breaks first, and what starting infrastructure should we provision?"**
+
+To keep findings verifiable, every benchmark decision is structured into three layers:
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. OBSERVED METRICS                                                         │
+│    Empirical test measurements: peak VUs, P50/P95 latency, RPS, error %    │
+│    and live container cgroup telemetry (CPU %, RAM MB, DB connection pools). │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 2. INFERRED BOTTLENECK                                                      │
+│    Algorithmic root-cause diagnosis: identifies saturation knee-points      │
+│    and correlates latency surges to specific resources (CPU, DB, network). │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 3. RECOMMENDED SIZING                                                       │
+│    Operational infrastructure guidance: applies a configurable safety factor│
+│    and maps workload demands to candidate starting cloud infrastructure.   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Measured Boundary vs. Safe Production Load
+A capacity benchmark does not prove an immutable physical maximum. It discovers performance behavior under a specific test configuration, dataset, network path, and SLA criteria.
+
+CapacityLab explicitly distinguishes:
+- **Measured Capacity Boundary:** The highest load observed during the test with zero SLA breaches.
+- **Safe Production Load:** A recommended production threshold calculated via a configurable safety factor:
+
+$$\text{Safe Production Load} = \text{Measured Capacity Boundary} \times \text{safety\_factor}$$
+
+By default, CapacityLab applies `safety_factor: 0.70` (providing a **30% operational headroom buffer** for traffic spikes, background jobs, and latency variance). Configure this in `capacitylab.yaml`:
+
+```yaml
+thresholds:
+  max_p95_latency_ms: 1500
+  max_error_rate_percent: 1.0
+  safety_factor: 0.70    # Range 0.10 to 1.0 (e.g., 0.70 = 30% headroom, 0.80 = 20% headroom)
+```
+
+---
+
+## Quickstart
+
+### Option A: Test a Hosted API Directly
 ```bash
 capacitylab run --url https://api.example.com --start-users 5 --max-users 50 --open
 ```
 
-### Option B: Interactive Setup Wizard
+### Option B: Guided Setup Wizard
 ```bash
 # 1. Interactive setup (generates capacitylab.yaml)
 capacitylab init
@@ -34,8 +76,8 @@ capacitylab validate
 capacitylab run --open
 ```
 
-### Option C: Try the Pre-Configured Docker Sandbox
-Test CapacityLab in 60 seconds without configuring any backend using the [`examples/quickstart/`](examples/quickstart/) sandbox:
+### Option C: Run the Docker Sandbox
+Run a test without configuring an external backend using the [`examples/quickstart/`](examples/quickstart/) sandbox:
 ```bash
 cd examples/quickstart
 docker compose up -d --build
@@ -66,7 +108,7 @@ capacitylab version
 
 ---
 
-## Testing Scenarios: What to Run & What It Does
+## Testing Scenarios
 
 ### 1. Benchmark a Hosted / Cloud API
 **Goal:** Determine how much traffic an external API (Render, Fly.io, AWS, Staging) can handle, and estimate monthly hosting costs.
@@ -92,6 +134,7 @@ workload:
 thresholds:
   max_p95_latency_ms: 1500
   max_error_rate_percent: 1.0
+  safety_factor: 0.70 # 30% operational headroom
 
 scenarios:
   - name: invoices
@@ -102,35 +145,42 @@ scenarios:
 ```
 
 **What it does & output:**
-Increments virtual users step-by-step. Pinpoints the saturation knee-point where latency surges, calculates safe production capacity, and outputs transparent multi-cloud cost estimates:
+Increments virtual users step-by-step. Discovers the capacity boundary where latency diverges, calculates safe operating capacity with configurable headroom, and outputs transparent multi-cloud cost estimates:
 
 ```
 ===============================================================
-                    CAPACITYLAB BENCHMARK VERDICT              
+             CAPACITY DECISION & EVIDENCE SUMMARY              
 ===============================================================
 
-Target Workload:           50 concurrent users
-Max Observed Capacity:     25 concurrent users
-Safe Production Load:      ~17 users (30% safety buffer)
+[OBSERVED METRICS]
+  Target Workload Tested:    50 concurrent users
+  Measured Capacity Boundary: 25 concurrent users
+  Boundary Throughput:       28.3 req/s (p50: 182.4ms, p95: 394.1ms, errors: 0.0%)
+  Runner Host Integrity:     Zero runner starvation (Peak CPU: 3.4%, RAM: 28.1 MB, TIME_WAIT: 12)
 
-Primary Bottleneck:        Downstream Latency Saturation
-Sizing Rationale:          Calculated from sustained traffic ceiling of 28.3 RPS.
+[INFERRED BOTTLENECK]
+  Limiting Resource:         [CRITICAL] Downstream Latency Saturation
+  Diagnostic Evidence:       p95 latency surged 3.1x crossing SLA threshold at stage 3
+  Actionable Fix:            Optimize endpoint query latency or scale upstream database read replicas
 
-Recommended Production Sizing (Small Tier - with 30% safety buffer)
-  • Target Host:     1.0 vCPU, 1 GB RAM (Estimated from traffic ceiling)
+[RECOMMENDED SIZING]
+  Safe Production Load:      ~17 concurrent users (using 0.70 safety factor / 30% operational headroom)
+  Candidate Starting Tier:   Small Tier
+  Target Host Sizing:        1.0 vCPU, 1 GB RAM (Estimated from traffic ceiling)
 
-Multi-Cloud Cost Estimates:
-  ➔ Budget VPS:      $6–$10/mo (Hetzner CX22 / DO 1GB)
-  ➔ Managed PaaS:    $14–$21/mo (Render Starter Web + DB / Fly.io)
-  ➔ Hyperscaler:     $25–$45/mo (AWS t4g.small + RDS db.t4g.micro)
+  Multi-Cloud Cost Estimates:
+    ➔ Budget VPS:            $6–$10/mo (Hetzner CX22 / DO 1GB)
+    ➔ Managed PaaS:          $14–$21/mo (Render Starter Web + DB / Fly.io)
+    ➔ Hyperscaler:           $25–$45/mo (AWS t4g.small + RDS db.t4g.micro)
 
-Interactive report: capacity-report.html
+  Note: Tiers and costs are candidate starting estimates derived under test conditions. Calibrate against production.
+─────────────────────────────────────────────────────────────
 ```
 
 ---
 
 ### 2. Right-Size a Local Docker Stack
-**Goal:** Measure exact container CPU and memory requirements to set optimal resource limits in Docker Compose or Kubernetes.
+**Goal:** Measure container CPU and memory consumption under load to set optimal resource limits in Docker Compose or Kubernetes.
 
 **Command:**
 ```bash
@@ -154,6 +204,11 @@ services:
   redis:
     addr: localhost:6379
 
+thresholds:
+  max_p95_latency_ms: 500
+  max_error_rate_percent: 1.0
+  safety_factor: 0.70
+
 scenarios:
   - name: orders
     weight: 100
@@ -165,11 +220,15 @@ scenarios:
 Scrapes Docker cgroup metrics, PostgreSQL pool connections, and Redis memory every 500ms without installing any agent inside your container:
 
 ```
-Primary Bottleneck:        API CPU Saturation (88.4% utilization)
+[INFERRED BOTTLENECK]
+  Limiting Resource:         [CRITICAL] API CPU Saturation (88.4% utilization)
+  Diagnostic Evidence:       cgroup CPU quota throttled; latency doubled from 45ms to 92ms
 
-Recommended Production Sizing (Compute-Optimized Tier - with 30% safety buffer)
-  • API Container:   2.0 vCPU, 1 GB RAM (Peak CPU: 88.4%)
-  • PostgreSQL:      100 max connections (Peak: 42 connections)
+[RECOMMENDED SIZING]
+  Safe Production Load:      ~35 concurrent users (using 0.70 safety factor / 30% operational headroom)
+  Candidate Starting Tier:   Compute-Optimized Tier
+    • API Container Sizing:  2.0 vCPU, 1 GB RAM (Peak CPU: 88.4%, RAM: 142 MB)
+    • PostgreSQL Sizing:     100 max connections (Peak: 42 connections)
 ```
 
 ---
@@ -382,7 +441,7 @@ capacitylab completion zsh > "${fpath[1]}/_capacitylab"
 
 ---
 
-## All Commands & Flags Reference
+## Command Reference
 
 | Command | Key Flags | What It Does |
 | :--- | :--- | :--- |
@@ -416,6 +475,12 @@ go build -o capacitylab ./cmd/capacitylab
 
 ---
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for upcoming milestones, including test environment fingerprinting, confidence interval sizing, and multi-framework sandbox templates.
+
+---
+
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

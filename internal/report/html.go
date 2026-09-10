@@ -52,11 +52,12 @@ type SizingData struct {
 	TotalCostEst         string
 	OverprovisionWarning string
 
-	IsRemoteTarget  bool
-	SizingRationale string
-	CostBudgetVPS   string
-	CostPaaS        string
-	CostHyperscaler string
+	IsRemoteTarget    bool
+	SafetyHeadroomPct float64
+	SizingRationale   string
+	CostBudgetVPS     string
+	CostPaaS          string
+	CostHyperscaler   string
 }
 
 // DatabaseTelemetry holds database statistics harvested during the test
@@ -608,12 +609,12 @@ const htmlTemplate = `<!DOCTYPE html>
     <!-- Metrics Cards -->
     <div class="grid">
       <div class="card">
-        <div class="card-label">Recommended Capacity</div>
+        <div class="card-label">Recommended Operating Load</div>
         <div class="card-value val-green">~{{.SustainableVUs}} users</div>
-        <div class="card-sub">With 30% production safety buffer</div>
+        <div class="card-sub">With {{printf "%.0f" .Sizing.SafetyHeadroomPct}}% operational safety headroom</div>
       </div>
       <div class="card">
-        <div class="card-label">Max Observed Load</div>
+        <div class="card-label">Measured Capacity Boundary</div>
         <div class="card-value val-blue">{{.MaxObservedVUs}} users</div>
         <div class="card-sub">Target workload: {{.TargetVUs}} users</div>
       </div>
@@ -775,11 +776,11 @@ const htmlTemplate = `<!DOCTYPE html>
       <div class="sizing-header">
         <div class="sizing-title-group">
           <div class="sizing-kicker">INFRASTRUCTURE BLUEPRINT &amp; SIZING</div>
-          <h2 class="sizing-heading">Recommended Production Sizing ({{.Sizing.TierName}})</h2>
+          <h2 class="sizing-heading">Candidate Infrastructure Sizing ({{.Sizing.TierName}})</h2>
         </div>
         <div class="sizing-badges">
           <span class="pill-tier">{{.Sizing.TierName}}</span>
-          <span class="pill-headroom">🛡️ 30% Headroom Included</span>
+          <span class="pill-headroom">🛡️ {{printf "%.0f" .Sizing.SafetyHeadroomPct}}% Headroom Included</span>
         </div>
       </div>
 
@@ -927,6 +928,10 @@ const htmlTemplate = `<!DOCTYPE html>
         </div>
       </div>
       {{end}}
+
+      <div style="margin-top: 18px; padding: 12px 16px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; font-size: 12px; color: var(--muted); line-height: 1.5;">
+        <strong style="color: #94a3b8;">Methodology Notice:</strong> Sustainable operating capacity applies a configurable {{printf "%.0f" .Sizing.SafetyHeadroomPct}}% operational safety headroom to the empirical capacity boundary. Recommended infrastructure tiers and cost comparisons represent candidate starting baselines derived under test conditions; calibrate against production telemetry before committing resources.
+      </div>
     </section>
   </div>
 

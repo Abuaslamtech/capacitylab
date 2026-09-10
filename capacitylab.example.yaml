@@ -49,6 +49,7 @@ thresholds:
   max_p95_latency_ms: 250
   max_error_rate_percent: 1.0
   max_cpu_throttle_percent: 15
+  safety_factor: 0.70 # Configurable operational headroom buffer (0.70 = 30% safety margin)
 
 # Realistic Weighted User Journeys (supports dynamic generators: {{$uuid}}, {{$timestamp}}, {{$random_int(min,max)}})
 scenarios:

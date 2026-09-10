@@ -10,10 +10,10 @@ import (
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "capacitylab",
-	Short: "CapacityLab is a developer infrastructure & capacity planning tool",
+	Short: "CapacityLab: discover your backend's real capacity boundary and right-sized infrastructure",
 	Long: BrandBanner("Autonomous Infrastructure & Capacity Sizing Engine") + `
-  Simulates realistic multi-step user workloads, detects saturation knees,
-  and estimates exact production cloud infrastructure for your application.`,
+  Simulates realistic multi-step user workloads, discovers capacity boundaries,
+  pinpoints bottlenecks, and estimates candidate starting cloud infrastructure.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// If user types just 'capacitylab', show the help menu
 		_ = cmd.Help()

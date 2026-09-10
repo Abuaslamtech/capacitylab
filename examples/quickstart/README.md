@@ -1,14 +1,14 @@
 # Quickstart Sandbox
 
-This directory contains a complete, self-contained microservice stack to test CapacityLab in under 60 seconds with Docker container resource telemetry.
+This directory contains a microservice stack to test CapacityLab with Docker container resource telemetry.
 
 ## Architecture
 
-- **`main.go`**: High-performance Go HTTP service implementing health checks, simulated crypto-auth (`/api/v1/auth/login`), item persistence with lock concurrency, and simulated database jitter.
-- **`docker-compose.yml`**: Spins up `quickstart-api` throttled to **0.50 vCPU** and **256MB RAM** to demonstrate real container saturation limits.
-- **`capacitylab.yaml`**: Multi-step user journey exercising authentication token extraction, authorization headers, dynamic random template variables, and SLA threshold enforcement.
+- **`main.go`**: Go HTTP service implementing health checks, crypto-auth simulation (`/api/v1/auth/login`), item persistence with lock concurrency, and database jitter.
+- **`docker-compose.yml`**: Runs `quickstart-api` constrained to **0.50 vCPU** and **256MB RAM** to test container saturation limits.
+- **`capacitylab.yaml`**: User journey testing authentication token extraction, authorization headers, dynamic random template variables, and SLA thresholds.
 
-## 30-Second Walkthrough
+## Quickstart Walkthrough
 
 ### 1. Start the Sandbox Stack
 
@@ -29,12 +29,12 @@ From this directory:
 capacitylab run --open
 ```
 
-### 3. What CapacityLab Will Demonstrate
+### 3. What CapacityLab Measures
 
-1. **Synthetic Warmup**: Primes the container and caches for 5 seconds before measuring.
-2. **Knee-Point Detection**: Sentinel monitors latency acceleration curves and flags the inflection point where queueing begins.
-3. **Container Telemetry**: Collects live Docker CPU % and RAM utilization from the container daemon.
-4. **Root-Cause Classification**: Automatically reports when CPU approaches the 0.50 core throttle limit or latency breaches SLA.
+1. **Warmup Phase**: Primes the container and caches for 5 seconds before measuring.
+2. **Knee-Point Detection**: Sentinel tracks latency acceleration curves to detect the inflection point where queueing begins.
+3. **Container Telemetry**: Scrapes live Docker CPU and RAM utilization from the container daemon.
+4. **Root-Cause Classification**: Reports when CPU approaches the 0.50 core limit or latency breaches SLA.
 5. **Interactive Report**: Generates `capacity-report.html` with latency histograms, stage telemetry, and multi-cloud sizing cost estimates.
 
 ### 4. Cleanup

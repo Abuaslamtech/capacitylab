@@ -121,9 +121,10 @@ type Config struct {
 }
 
 type Application struct {
-	Name    string  `yaml:"name"`
-	URL     string  `yaml:"url"`
-	Startup Startup `yaml:"startup"`
+	Name     string  `yaml:"name"`
+	URL      string  `yaml:"url"`
+	Insecure bool    `yaml:"insecure"`
+	Startup  Startup `yaml:"startup"`
 }
 
 type Startup struct {
@@ -184,7 +185,9 @@ type Thresholds struct {
 	MaxMemoryPercent      float64 `yaml:"max_memory_percent"`
 	MaxP95LatencyMs       float64 `yaml:"max_p95_latency_ms"`
 	MaxErrorRatePercent   float64 `yaml:"max_error_rate_percent"`
+	MaxErrorRatePct       float64 `yaml:"max_error_rate_pct"` // Alias for max_error_rate_percent
 	MaxCPUThrottlePercent float64 `yaml:"max_cpu_throttle_percent"`
+	SafetyFactor          float64 `yaml:"safety_factor"` // Headroom multiplier (default 0.70 = 30% operational headroom)
 }
 
 type Scenario struct {
@@ -227,6 +230,22 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if (c.Workload.Type == "soak" || c.Workload.Type == "constant") && c.Workload.Duration <= 0 {
+		if c.Workload.StepDuration > 0 {
+			c.Workload.Duration = c.Workload.StepDuration * 5
+		} else {
+			c.Workload.Duration = 60 * time.Second
+		}
+	}
+
+	// Default step & warmup durations if not set
+	if c.Workload.StepDuration <= 0 {
+		c.Workload.StepDuration = 6 * time.Second
+	}
+	if c.Workload.WarmupDuration <= 0 {
+		c.Workload.WarmupDuration = 5 * time.Second
+	}
+
 	// Validate Workload
 	if c.Workload.StartUsers <= 0 {
 		return fmt.Errorf("workload.start_users must be > 0 (got: %d)", c.Workload.StartUsers)
@@ -241,14 +260,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("workload.step must be > 0 (got: %d)", c.Workload.Step)
 	} else if c.Workload.Step <= 0 {
 		c.Workload.Step = 1
-	}
-
-	if (c.Workload.Type == "soak" || c.Workload.Type == "constant") && c.Workload.Duration <= 0 {
-		if c.Workload.StepDuration > 0 {
-			c.Workload.Duration = c.Workload.StepDuration * 5
-		} else {
-			c.Workload.Duration = 60 * time.Second
-		}
 	}
 
 	// Default or validate Pacing
@@ -284,6 +295,16 @@ func (c *Config) Validate() error {
 	}
 	if c.Thresholds.MaxCPUThrottlePercent <= 0 {
 		c.Thresholds.MaxCPUThrottlePercent = 15.0 // default 15% throttle limit
+	}
+
+	// Support max_error_rate_pct alias if max_error_rate_percent was not set
+	if c.Thresholds.MaxErrorRatePercent <= 0 && c.Thresholds.MaxErrorRatePct > 0 {
+		c.Thresholds.MaxErrorRatePercent = c.Thresholds.MaxErrorRatePct
+	}
+
+	// Default safety factor to 0.70 (30% operational headroom buffer)
+	if c.Thresholds.SafetyFactor <= 0 || c.Thresholds.SafetyFactor > 1.0 {
+		c.Thresholds.SafetyFactor = 0.70
 	}
 
 	// Validate Scenarios

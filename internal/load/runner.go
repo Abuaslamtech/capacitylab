@@ -48,14 +48,48 @@ type Runner struct {
 	baseURL    string
 }
 
+const maxLatencySamples = 50000
+
+type latencyCollector struct {
+	mu      sync.Mutex
+	samples []float64
+	count   int64
+}
+
+func (c *latencyCollector) addBatch(batch []float64) {
+	if len(batch) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, lat := range batch {
+		c.count++
+		if len(c.samples) < maxLatencySamples {
+			c.samples = append(c.samples, lat)
+		} else {
+			// Algorithm R reservoir sampling to bound memory during long endurance/soak runs
+			idx := rand.Int63n(c.count)
+			if idx < int64(maxLatencySamples) {
+				c.samples[idx] = lat
+			}
+		}
+	}
+}
+
 // NewRunner creates a load runner with connection pooling to prevent socket exhaustion (Trap 4)
 func NewRunner(cfg *config.Config) *Runner {
+	insecure := false
+	if cfg != nil && cfg.Application.Insecure {
+		insecure = true
+	}
+
 	transport := &http.Transport{
 		MaxIdleConns:        2000,
 		MaxIdleConnsPerHost: 1000,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: insecure},
 	}
 
 	client := &http.Client{
@@ -88,8 +122,7 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 		totalReqs        atomic.Int64
 		successes        atomic.Int64
 		errorCount       atomic.Int64
-		mu               sync.Mutex
-		latencies        []float64
+		collector        latencyCollector
 		stageCtx, cancel = context.WithTimeout(ctx, duration)
 	)
 	defer cancel()
@@ -101,12 +134,14 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 		wg.Add(1)
 		go func() {
 			var localLatencies []float64
-			defer func() {
+			flush := func() {
 				if len(localLatencies) > 0 {
-					mu.Lock()
-					latencies = append(latencies, localLatencies...)
-					mu.Unlock()
+					collector.addBatch(localLatencies)
+					localLatencies = localLatencies[:0]
 				}
+			}
+			defer func() {
+				flush()
 				wg.Done()
 			}()
 
@@ -122,6 +157,9 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 
 					totalReqs.Add(1)
 					localLatencies = append(localLatencies, latency)
+					if len(localLatencies) >= 500 {
+						flush()
+					}
 
 					if err != nil {
 						// Only count real network or server errors, not the stage timer expiring
@@ -168,7 +206,7 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 		errPercent = (float64(errs) / float64(tot)) * 100.0
 	}
 
-	p50, p90, p95, p99 := calculatePercentiles(latencies)
+	p50, p90, p95, p99 := calculatePercentiles(collector.samples)
 
 	return &StageMetrics{
 		VUs:           vus,
