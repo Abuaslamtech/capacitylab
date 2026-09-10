@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	goRuntime "runtime"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -84,19 +86,25 @@ func (d *DockerClient) ContainerStatus(ctx context.Context, containerName string
 	return inspect.State.Running, inspect.State.Status, nil
 }
 
-// UpdateResources dynamically adjusts CPU and RAM limits on a running container via cgroups
-func (d *DockerClient) UpdateResources(ctx context.Context, containerName string, cpus float64, memoryMB int64) error {
+// UpdateResources dynamically adjusts CPU, RAM limits, and CPU pinning on a running container via cgroups
+func (d *DockerClient) UpdateResources(ctx context.Context, containerName string, cpus float64, memoryMB int64, cpusetCpus ...string) error {
 	nanoCPUs := int64(cpus * 1e9)
 	memoryBytes := memoryMB * 1024 * 1024
 	// In Docker, MemorySwap must be >= Memory to satisfy the kernel cgroup constraint
 	memorySwapBytes := memoryBytes * 2
 
+	resources := container.Resources{
+		NanoCPUs:   nanoCPUs,
+		Memory:     memoryBytes,
+		MemorySwap: memorySwapBytes,
+	}
+
+	if len(cpusetCpus) > 0 && cpusetCpus[0] != "" {
+		resources.CpusetCpus = cpusetCpus[0]
+	}
+
 	updateConfig := container.UpdateConfig{
-		Resources: container.Resources{
-			NanoCPUs:   nanoCPUs,
-			Memory:     memoryBytes,
-			MemorySwap: memorySwapBytes,
-		},
+		Resources: resources,
 	}
 
 	res, err := d.cli.ContainerUpdate(ctx, containerName, updateConfig)
@@ -111,6 +119,51 @@ func (d *DockerClient) UpdateResources(ctx context.Context, containerName string
 	}
 
 	return nil
+}
+
+// HostEnvironmentInfo provides topology inspection of the Docker host and hypervisor (Trap 2)
+type HostEnvironmentInfo struct {
+	IsDockerDesktop bool
+	IsWSL2          bool
+	IsNativeLinux   bool
+	OSType          string
+	OperatingSystem string
+	ServerVersion   string
+	TotalMemMB      float64
+	CPUs            int
+	Warning         string
+}
+
+// DetectEnvironment inspects the Docker daemon to identify virtualization skew and memory headroom
+func (d *DockerClient) DetectEnvironment(ctx context.Context) (HostEnvironmentInfo, error) {
+	info, err := d.cli.Info(ctx)
+	if err != nil {
+		return HostEnvironmentInfo{}, fmt.Errorf("failed to fetch docker info: %w", err)
+	}
+
+	totalMemMB := float64(info.MemTotal) / (1024 * 1024)
+	isDesktop := strings.Contains(strings.ToLower(info.OperatingSystem), "desktop") ||
+		strings.Contains(strings.ToLower(info.ServerVersion), "desktop") ||
+		strings.Contains(strings.ToLower(info.Name), "docker-desktop")
+	isWSL := strings.Contains(strings.ToLower(info.KernelVersion), "wsl") ||
+		strings.Contains(strings.ToLower(info.OperatingSystem), "wsl")
+
+	envInfo := HostEnvironmentInfo{
+		IsDockerDesktop: isDesktop,
+		IsWSL2:          isWSL,
+		IsNativeLinux:   !isDesktop && !isWSL && goRuntime.GOOS == "linux",
+		OSType:          info.OSType,
+		OperatingSystem: info.OperatingSystem,
+		ServerVersion:   info.ServerVersion,
+		TotalMemMB:      totalMemMB,
+		CPUs:            info.NCPU,
+	}
+
+	if isDesktop && totalMemMB < 3500 {
+		envInfo.Warning = fmt.Sprintf("Docker Desktop VM memory ceiling is low (%.0f MB). Increase VM memory in Docker Desktop Settings to prevent false OOM skew.", totalMemMB)
+	}
+
+	return envInfo, nil
 }
 
 // GetMetrics takes a single point-in-time sample of container resource usage

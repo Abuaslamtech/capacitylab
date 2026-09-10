@@ -15,13 +15,20 @@ type PostgresMetrics struct {
 	MaxConnections    int
 	CacheHitRatio     float64
 	WaitingLocks      int
+	XactCommitRate    float64
+	XactRollbackRate  float64
 }
 
-// PostgresMonitor queries PostgreSQL system catalogs directly
+// PostgresMonitor queries PostgreSQL system catalogs directly.
 type PostgresMonitor struct {
-	dsn  string
-	conn *pgx.Conn
+	dsn          string
+	conn         *pgx.Conn
+	lastHarvest  time.Time
+	lastCommit   int64
+	lastRollback int64
 }
+
+var _ DatabaseMonitor[*PostgresMetrics] = (*PostgresMonitor)(nil)
 
 // NewPostgresMonitor establishes a lightweight telemetry connection to PostgreSQL
 func NewPostgresMonitor(dsn string) (*PostgresMonitor, error) {
@@ -44,15 +51,16 @@ func NewPostgresMonitor(dsn string) (*PostgresMonitor, error) {
 }
 
 // Close terminates the PostgreSQL connection
-func (p *PostgresMonitor) Close(ctx context.Context) {
-	if p.conn != nil {
-		_ = p.conn.Close(ctx)
+func (p *PostgresMonitor) Close(ctx context.Context) error {
+	if p != nil && p.conn != nil {
+		return p.conn.Close(ctx)
 	}
+	return nil
 }
 
 // Harvest collects live database telemetry from pg_stat_activity and pg_stat_database
 func (p *PostgresMonitor) Harvest(ctx context.Context) (*PostgresMetrics, error) {
-	if p.conn == nil {
+	if p == nil || p.conn == nil {
 		return nil, nil
 	}
 
@@ -80,6 +88,7 @@ func (p *PostgresMonitor) Harvest(ctx context.Context) (*PostgresMetrics, error)
 				}
 			}
 		}
+		_ = rows.Err()
 	}
 
 	// 3. Get buffer cache hit ratio from pg_stat_database
@@ -99,6 +108,33 @@ func (p *PostgresMonitor) Harvest(ctx context.Context) (*PostgresMetrics, error)
 	err = p.conn.QueryRow(ctx, "SELECT count(*) FROM pg_locks WHERE NOT granted").Scan(&lockCount)
 	if err == nil {
 		metrics.WaitingLocks = lockCount
+	}
+
+	// 5. Transaction commit / rollback rates from pg_stat_database (README Section 3 & 4)
+	var xactCommit, xactRollback int64
+	err = p.conn.QueryRow(ctx, `
+		SELECT coalesce(sum(xact_commit), 0), coalesce(sum(xact_rollback), 0)
+		FROM pg_stat_database 
+		WHERE datname = current_database()
+	`).Scan(&xactCommit, &xactRollback)
+	if err == nil {
+		now := time.Now()
+		if !p.lastHarvest.IsZero() {
+			deltaSec := now.Sub(p.lastHarvest).Seconds()
+			if deltaSec > 0 {
+				metrics.XactCommitRate = float64(xactCommit-p.lastCommit) / deltaSec
+				metrics.XactRollbackRate = float64(xactRollback-p.lastRollback) / deltaSec
+				if metrics.XactCommitRate < 0 {
+					metrics.XactCommitRate = 0
+				}
+				if metrics.XactRollbackRate < 0 {
+					metrics.XactRollbackRate = 0
+				}
+			}
+		}
+		p.lastHarvest = now
+		p.lastCommit = xactCommit
+		p.lastRollback = xactRollback
 	}
 
 	return metrics, nil

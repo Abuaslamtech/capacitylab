@@ -131,17 +131,17 @@ func parseStep(stepMap config.ScenarioStep) (ParsedStep, error) {
 	return parsed, nil
 }
 
-func extractPathAndDetails(val interface{}, parsed ParsedStep) (ParsedStep, error) {
+func extractPathAndDetails(val any, parsed ParsedStep) (ParsedStep, error) {
 	switch v := val.(type) {
 	case string:
 		parsed.Path = v
 		return parsed, nil
 
-	case map[string]interface{}:
+	case map[string]any:
 		if p, ok := v["path"].(string); ok {
 			parsed.Path = p
 		}
-		if hdrs, ok := v["headers"].(map[string]interface{}); ok {
+		if hdrs, ok := v["headers"].(map[string]any); ok {
 			for k, hVal := range hdrs {
 				parsed.Headers[k] = fmt.Sprintf("%v", hVal)
 			}
@@ -157,10 +157,10 @@ func extractPathAndDetails(val interface{}, parsed ParsedStep) (ParsedStep, erro
 			}
 		}
 
-		// Detect if step contains dynamic generator placeholders
-		hasDynamic := strings.Contains(parsed.Path, "{{$") || bytes.Contains(parsed.Body, []byte("{{$"))
+		// Detect if step contains dynamic generator or session placeholders
+		hasDynamic := strings.Contains(parsed.Path, "{{") || bytes.Contains(parsed.Body, []byte("{{"))
 		for _, h := range parsed.Headers {
-			if strings.Contains(h, "{{$") {
+			if strings.Contains(h, "{{") {
 				hasDynamic = true
 				break
 			}
@@ -173,9 +173,11 @@ func extractPathAndDetails(val interface{}, parsed ParsedStep) (ParsedStep, erro
 	}
 }
 
+var tokenPattern = regexp.MustCompile(`\{\{([^{}]+)\}\}`)
+
 // ResolveExecution returns the method, path, headers, and body for a single request invocation
-func (p *ParsedStep) ResolveExecution() (string, string, map[string]string, io.Reader) {
-	if !p.HasDynamicVariables {
+func (p *ParsedStep) ResolveExecution(session map[string]string) (string, string, map[string]string, io.Reader) {
+	if !p.HasDynamicVariables && len(session) == 0 {
 		var bodyReader io.Reader
 		if len(p.Body) > 0 {
 			bodyReader = bytes.NewReader(p.Body)
@@ -183,19 +185,86 @@ func (p *ParsedStep) ResolveExecution() (string, string, map[string]string, io.R
 		return p.Method, p.Path, p.Headers, bodyReader
 	}
 
-	resolvedPath := InterpolateDynamic(p.Path)
+	resolvedPath := InterpolateString(p.Path, session)
 	resolvedHeaders := make(map[string]string, len(p.Headers))
 	for k, v := range p.Headers {
-		resolvedHeaders[k] = InterpolateDynamic(v)
+		resolvedHeaders[k] = InterpolateString(v, session)
 	}
 
 	var bodyReader io.Reader
 	if len(p.Body) > 0 {
-		resolvedBody := []byte(InterpolateDynamic(string(p.Body)))
+		resolvedBody := []byte(InterpolateString(string(p.Body), session))
 		bodyReader = bytes.NewReader(resolvedBody)
 	}
 
 	return p.Method, resolvedPath, resolvedHeaders, bodyReader
+}
+
+// InterpolateString evaluates both generator tokens ({{$uuid}}) and session response tokens ({{response.body.id}})
+func InterpolateString(input string, session map[string]string) string {
+	if !strings.Contains(input, "{{") {
+		return input
+	}
+
+	// 1. Evaluate generators {{$uuid}}, {{$timestamp}}, {{$random_int}}
+	input = InterpolateDynamic(input)
+
+	// 2. Handle shorthand aliases without dollar sign ({{uuid}}, {{timestamp}})
+	if strings.Contains(input, "{{uuid}}") {
+		input = strings.ReplaceAll(input, "{{uuid}}", generateUUID())
+	}
+	if strings.Contains(input, "{{timestamp}}") {
+		input = strings.ReplaceAll(input, "{{timestamp}}", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	}
+
+	// 3. Evaluate session/response tokens: {{response.body.sale_id}}
+	if len(session) > 0 && strings.Contains(input, "{{") {
+		input = tokenPattern.ReplaceAllStringFunc(input, func(m string) string {
+			key := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(m, "{{"), "}}"))
+			if val, ok := session[key]; ok {
+				return val
+			}
+			return m
+		})
+	}
+
+	return input
+}
+
+// ExtractResponseContext parses response attributes and JSON body into dot-notation session variables
+func ExtractResponseContext(status int, headers map[string][]string, bodyBytes []byte, dest map[string]string) {
+	dest["response.status"] = strconv.Itoa(status)
+	for k, v := range headers {
+		if len(v) > 0 {
+			dest["response.header."+strings.ToLower(k)] = v[0]
+		}
+	}
+	if len(bodyBytes) > 0 {
+		var parsed any
+		if err := json.Unmarshal(bodyBytes, &parsed); err == nil {
+			flattenJSON("response.body", parsed, dest)
+		}
+	}
+}
+
+func flattenJSON(prefix string, val any, dest map[string]string) {
+	switch v := val.(type) {
+	case map[string]any:
+		for k, child := range v {
+			p := k
+			if prefix != "" {
+				p = prefix + "." + k
+			}
+			flattenJSON(p, child, dest)
+		}
+	case []any:
+		for i, child := range v {
+			p := fmt.Sprintf("%s.%d", prefix, i)
+			flattenJSON(p, child, dest)
+		}
+	default:
+		dest[prefix] = fmt.Sprintf("%v", val)
+	}
 }
 
 // InterpolateDynamic evaluates runtime generator tokens in strings ({{$uuid}}, {{$timestamp}}, {{$random_int}})

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -29,13 +30,14 @@ type DashboardData struct {
 	TotalRuns       int
 	LatestApp       string
 	Runs            []DashboardRunSummary
+	EmbeddedChartJS template.JS
 	ChartLabelsJSON template.JS
 	ChartCapJSON    template.JS
 	ChartRPSJSON    template.JS
 }
 
-// GenerateDashboardHTML bakes historical runs into an interactive multi-run dashboard
-func GenerateDashboardHTML(filepathStr string, runs []DashboardRunSummary) error {
+// RenderDashboardHTML returns the generated dashboard HTML as a byte slice
+func RenderDashboardHTML(runs []DashboardRunSummary) ([]byte, error) {
 	var labels []string
 	var capacities []int
 	var rps []float64
@@ -62,6 +64,7 @@ func GenerateDashboardHTML(filepathStr string, runs []DashboardRunSummary) error
 		TotalRuns:       len(runs),
 		LatestApp:       latestApp,
 		Runs:            runs,
+		EmbeddedChartJS: template.JS(embeddedChartJS),
 		ChartLabelsJSON: template.JS(labelsJSON),
 		ChartCapJSON:    template.JS(capJSON),
 		ChartRPSJSON:    template.JS(rpsJSON),
@@ -69,20 +72,29 @@ func GenerateDashboardHTML(filepathStr string, runs []DashboardRunSummary) error
 
 	tmpl, err := template.New("dashboard").Parse(dashboardTemplate)
 	if err != nil {
-		return fmt.Errorf("failed to parse dashboard template: %w", err)
+		return nil, fmt.Errorf("failed to parse dashboard template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, fmt.Errorf("failed to execute dashboard template: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// GenerateDashboardHTML bakes historical runs into an interactive multi-run dashboard file
+func GenerateDashboardHTML(filepathStr string, runs []DashboardRunSummary) error {
+	rendered, err := RenderDashboardHTML(runs)
+	if err != nil {
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(filepathStr), 0755); err != nil {
 		return err
 	}
 
-	file, err := os.Create(filepathStr)
-	if err != nil {
-		return fmt.Errorf("failed to create dashboard file: %w", err)
-	}
-	defer file.Close()
-
-	return tmpl.Execute(file, data)
+	return os.WriteFile(filepathStr, rendered, 0644)
 }
 
 const dashboardTemplate = `<!DOCTYPE html>
@@ -91,7 +103,7 @@ const dashboardTemplate = `<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CapacityLab • Historical Trends Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>{{.EmbeddedChartJS}}</script>
   <style>
     :root {
       --bg: #090a0f;
@@ -133,6 +145,9 @@ const dashboardTemplate = `<!DOCTYPE html>
     tr:last-child td { border-bottom: none; }
     .tag-pass { background: rgba(16, 185, 129, 0.15); color: var(--success); padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
     .tag-fail { background: rgba(239, 68, 68, 0.15); color: var(--danger); padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
+    .live-card { background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 12px; padding: 16px 20px; margin-bottom: 24px; display: none; align-items: center; justify-content: space-between; }
+    .live-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; animation: pulse 1.5s infinite; margin-right: 10px; }
   </style>
 </head>
 <body>
@@ -143,6 +158,14 @@ const dashboardTemplate = `<!DOCTYPE html>
         <div class="meta">{{.LatestApp}} • {{.GeneratedAt}}</div>
       </div>
       <div class="badge">{{.TotalRuns}} Runs Recorded</div>
+    </div>
+
+    <div id="liveBanner" class="live-card">
+      <div style="display: flex; align-items: center;">
+        <span class="live-dot"></span>
+        <span id="liveStatus" style="font-weight: 600; color: var(--accent); font-size: 14px;">Live benchmark streaming...</span>
+      </div>
+      <span id="liveMetrics" style="font-size: 13px; color: var(--muted); font-family: monospace;"></span>
     </div>
 
     <div class="chart-card">
@@ -246,6 +269,28 @@ const dashboardTemplate = `<!DOCTYPE html>
         }
       }
     });
+
+    // Real-Time SSE Live Telemetry Consumer
+    if (window.EventSource) {
+      const liveBanner = document.getElementById('liveBanner');
+      const liveStatus = document.getElementById('liveStatus');
+      const liveMetrics = document.getElementById('liveMetrics');
+      const stream = new EventSource('/api/stream');
+
+      stream.addEventListener('telemetry', (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.type === 'stage_complete' && data.payload) {
+            const p = data.payload;
+            liveBanner.style.display = 'flex';
+            liveStatus.textContent = "🔴 Live Test [" + (p.app_name || 'Active') + "]: Stage " + p.stage + " (" + p.vus + " VUs)";
+            liveMetrics.textContent = Math.round(p.rps) + " RPS | p95: " + p.p95.toFixed(1) + "ms | API CPU: " + p.cpu.toFixed(1) + "% | RAM: " + p.memory_mb.toFixed(0) + "MB";
+          }
+        } catch (err) {
+          console.error("Failed to parse SSE payload", err);
+        }
+      });
+    }
   </script>
 </body>
 </html>

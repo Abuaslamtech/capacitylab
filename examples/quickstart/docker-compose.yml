@@ -1,0 +1,12 @@
+services:
+  quickstart-api:
+    build: .
+    container_name: quickstart-api
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+    restart: unless-stopped

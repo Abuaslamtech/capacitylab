@@ -1,69 +1,55 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 
-	"github.com/Abuaslamtech/capacitylab/internal/history"
+	"github.com/Abuaslamtech/capacitylab/internal/dashboard"
 	"github.com/Abuaslamtech/capacitylab/internal/report"
 	"github.com/spf13/cobra"
 )
 
+var (
+	dashboardPort int
+	dashboardOpen bool
+)
+
 var dashboardCmd = &cobra.Command{
 	Use:   "dashboard",
-	Short: "Open the interactive multi-run historical trends dashboard",
-	Long:  `Generates and opens an interactive HTML dashboard tracking capacity growth, throughput trends, and bottlenecks across all past benchmark runs.`,
+	Short: "Start the local live web dashboard and trends explorer",
+	Long:  `Spins up a lightweight local web server on localhost:4242 serving real-time SSE telemetry streams and historical benchmark comparisons.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		runs, err := history.ListRuns()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to read historical runs: %v\n", err)
+		srv := dashboard.NewServer(dashboardPort)
+		url := fmt.Sprintf("http://localhost:%d", dashboardPort)
+
+		fmt.Println("🚀 CapacityLab Live Dashboard Server")
+		fmt.Println("═════════════════════════════════════════════════════════════")
+		fmt.Printf("🌐 Serving on:                     %s\n", url)
+		fmt.Println("📊 Real-time SSE telemetry stream: /api/stream")
+		fmt.Println("📜 Historical runs API:           /api/runs")
+		fmt.Println("Press Ctrl+C to terminate.")
+		fmt.Println("═════════════════════════════════════════════════════════════")
+
+		if dashboardOpen {
+			_ = report.OpenInBrowser(url)
+		}
+
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+
+		if err := srv.Start(ctx); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "❌ Server error: %v\n", err)
 			os.Exit(1)
 		}
-
-		if len(runs) == 0 {
-			fmt.Println("ℹ️  No historical benchmark runs found.")
-			fmt.Println("   Execute 'capacitylab run' first to generate your baseline!")
-			return
-		}
-
-		var summaries []report.DashboardRunSummary
-		for _, r := range runs {
-			summaries = append(summaries, report.DashboardRunSummary{
-				ID:             r.ID,
-				Date:           r.Timestamp.Format("Jan 02 15:04"),
-				AppName:        r.AppName,
-				TargetURL:      r.TargetURL,
-				SustainableVUs: r.SustainableVUs,
-				MaxObservedVUs: r.MaxObservedVUs,
-				PeakRPS:        r.PeakRPS,
-				P95Ms:          r.P95LatencyMs,
-				Bottleneck:     r.PrimaryBottleneck,
-				Fix:            r.BottleneckFix,
-			})
-		}
-
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to locate user home directory: %v\n", err)
-			os.Exit(1)
-		}
-
-		dashboardPath := filepath.Join(home, ".capacitylab", "dashboard.html")
-		err = report.GenerateDashboardHTML(dashboardPath, summaries)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to generate dashboard: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Println("📊 CapacityLab Historical Dashboard Generated!")
-		fmt.Printf("   File: %s\n", dashboardPath)
-		fmt.Printf("   Recorded runs: %d\n", len(runs))
-		fmt.Println("🌐 Opening dashboard in your default browser...")
-		_ = report.OpenInBrowser(dashboardPath)
 	},
 }
 
 func init() {
+	dashboardCmd.Flags().IntVarP(&dashboardPort, "port", "p", 4242, "Port for the local web dashboard server")
+	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", true, "Automatically open dashboard in your default browser")
 	rootCmd.AddCommand(dashboardCmd)
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestExpandEnvWithDefaults(t *testing.T) {
@@ -78,4 +79,177 @@ func stringContains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestConfigValidationPacingAndThrottle(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "capacitylab.yaml")
+
+	yamlContent := `version: "1"
+application:
+  name: test-app
+  url: http://localhost:8080
+workload:
+  type: step-ramp
+  start_users: 10
+  max_users: 100
+  step: 10
+  step_duration: 10s
+  warmup_duration: 5s
+  pacing:
+    think_time_min: 150ms
+    think_time_max: 500ms
+thresholds:
+  max_cpu_percent: 85
+  max_memory_percent: 80
+  max_p95_latency_ms: 250
+  max_error_rate_percent: 1.0
+  max_cpu_throttle_percent: 20
+scenarios:
+  - name: health
+    weight: 100
+    flow:
+      - get: /health
+`
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if cfg.Workload.Pacing.ThinkTimeMin != 150*time.Millisecond {
+		t.Errorf("Expected think_time_min 150ms, got %v", cfg.Workload.Pacing.ThinkTimeMin)
+	}
+	if cfg.Workload.Pacing.ThinkTimeMax != 500*time.Millisecond {
+		t.Errorf("Expected think_time_max 500ms, got %v", cfg.Workload.Pacing.ThinkTimeMax)
+	}
+	if cfg.Thresholds.MaxCPUThrottlePercent != 20.0 {
+		t.Errorf("Expected max_cpu_throttle_percent 20.0, got %v", cfg.Thresholds.MaxCPUThrottlePercent)
+	}
+}
+
+func TestConfigAPIServiceAndEngine(t *testing.T) {
+	tempDir := t.TempDir()
+	cfgFile := filepath.Join(tempDir, "capacitylab.yaml")
+
+	yamlContent := `version: "1"
+application:
+  name: test-app
+  url: http://localhost:8080
+services:
+  api:
+    container: my-api
+    cpu: "1.5"
+    memory: "1GB"
+    cpuset: "0,1"
+workload:
+  type: step-ramp
+  engine: k6
+  start_users: 10
+  max_users: 50
+  step: 10
+  step_duration: 5s
+  warmup_duration: 2s
+thresholds:
+  max_cpu_percent: 85
+  max_memory_percent: 80
+  max_p95_latency_ms: 250
+  max_error_rate_percent: 1.0
+scenarios:
+  - name: test
+    weight: 100
+    flow:
+      - get: /ping
+`
+	if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("Failed to write yaml: %v", err)
+	}
+
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if cfg.Services.API.CPU != "1.5" || cfg.Services.API.Memory != "1GB" || cfg.Services.API.CPUSet != "0,1" {
+		t.Errorf("Unexpected API resource config: %+v", cfg.Services.API)
+	}
+	if cfg.Workload.Engine != "k6" {
+		t.Errorf("Expected workload.engine to be 'k6', got %q", cfg.Workload.Engine)
+	}
+}
+
+func TestConfigWorkloadModes(t *testing.T) {
+	tempDir := t.TempDir()
+
+	t.Run("Soak workload defaults max_users and duration", func(t *testing.T) {
+		cfgFile := filepath.Join(tempDir, "soak.yaml")
+		yamlContent := `version: "1"
+application:
+  name: soak-app
+  url: http://localhost:8080
+workload:
+  type: soak
+  start_users: 25
+thresholds:
+  max_p95_latency_ms: 500
+scenarios:
+  - name: health
+    weight: 100
+    flow:
+      - get: /health
+`
+		if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+			t.Fatalf("Failed to write yaml: %v", err)
+		}
+
+		cfg, err := Load(cfgFile)
+		if err != nil {
+			t.Fatalf("Failed to load soak config: %v", err)
+		}
+
+		if cfg.Workload.Type != "soak" {
+			t.Errorf("Expected workload type 'soak', got %s", cfg.Workload.Type)
+		}
+		if cfg.Workload.MaxUsers != 25 {
+			t.Errorf("Expected max_users to default to start_users (25), got %d", cfg.Workload.MaxUsers)
+		}
+		if cfg.Workload.Duration != 60*time.Second {
+			t.Errorf("Expected default duration of 60s, got %v", cfg.Workload.Duration)
+		}
+	})
+
+	t.Run("Spike workload validation", func(t *testing.T) {
+		cfgFile := filepath.Join(tempDir, "spike.yaml")
+		yamlContent := `version: "1"
+application:
+  name: spike-app
+  url: http://localhost:8080
+workload:
+  type: spike
+  start_users: 10
+  max_users: 100
+thresholds:
+  max_p95_latency_ms: 500
+scenarios:
+  - name: health
+    weight: 100
+    flow:
+      - get: /health
+`
+		if err := os.WriteFile(cfgFile, []byte(yamlContent), 0644); err != nil {
+			t.Fatalf("Failed to write yaml: %v", err)
+		}
+
+		cfg, err := Load(cfgFile)
+		if err != nil {
+			t.Fatalf("Failed to load spike config: %v", err)
+		}
+
+		if cfg.Workload.Type != "spike" {
+			t.Errorf("Expected workload type 'spike', got %s", cfg.Workload.Type)
+		}
+	})
 }

@@ -140,6 +140,9 @@ type Services struct {
 
 type APIService struct {
 	Container  string       `yaml:"container"`
+	CPU        string       `yaml:"cpu"`
+	Memory     string       `yaml:"memory"`
+	CPUSet     string       `yaml:"cpuset"`
 	TestMatrix MatrixConfig `yaml:"test_matrix"`
 }
 
@@ -161,18 +164,27 @@ type RedisService struct {
 
 type Workload struct {
 	Type           string        `yaml:"type"`
+	Engine         string        `yaml:"engine"`
 	StartUsers     int           `yaml:"start_users"`
 	MaxUsers       int           `yaml:"max_users"`
 	Step           int           `yaml:"step"`
 	StepDuration   time.Duration `yaml:"step_duration"`
 	WarmupDuration time.Duration `yaml:"warmup_duration"`
+	Duration       time.Duration `yaml:"duration"` // Used for soak / constant workloads
+	Pacing         PacingConfig  `yaml:"pacing"`
+}
+
+type PacingConfig struct {
+	ThinkTimeMin time.Duration `yaml:"think_time_min"`
+	ThinkTimeMax time.Duration `yaml:"think_time_max"`
 }
 
 type Thresholds struct {
-	MaxCPUPercent       float64 `yaml:"max_cpu_percent"`
-	MaxMemoryPercent    float64 `yaml:"max_memory_percent"`
-	MaxP95LatencyMs     float64 `yaml:"max_p95_latency_ms"`
-	MaxErrorRatePercent float64 `yaml:"max_error_rate_percent"`
+	MaxCPUPercent         float64 `yaml:"max_cpu_percent"`
+	MaxMemoryPercent      float64 `yaml:"max_memory_percent"`
+	MaxP95LatencyMs       float64 `yaml:"max_p95_latency_ms"`
+	MaxErrorRatePercent   float64 `yaml:"max_error_rate_percent"`
+	MaxCPUThrottlePercent float64 `yaml:"max_cpu_throttle_percent"`
 }
 
 type Scenario struct {
@@ -181,8 +193,8 @@ type Scenario struct {
 	Flow   []ScenarioStep `yaml:"flow"`
 }
 
-type ScenarioStep map[string]interface{}
-
+// ScenarioStep represents an individual step definition within a scenario flow.
+type ScenarioStep map[string]any
 
 // Validate verifies that the configuration values are semantically sound
 func (c *Config) Validate() error {
@@ -204,26 +216,74 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("application.url must be a valid HTTP/HTTPS URL (got: %s)", c.Application.URL)
 	}
 
+	// Validate Workload Type
+	if c.Workload.Type == "" {
+		c.Workload.Type = "step-ramp"
+	} else {
+		c.Workload.Type = strings.ToLower(strings.TrimSpace(c.Workload.Type))
+		validTypes := map[string]bool{"step-ramp": true, "soak": true, "constant": true, "spike": true}
+		if !validTypes[c.Workload.Type] {
+			return fmt.Errorf("invalid workload.type '%s' (supported: 'step-ramp', 'soak', 'spike')", c.Workload.Type)
+		}
+	}
+
 	// Validate Workload
 	if c.Workload.StartUsers <= 0 {
 		return fmt.Errorf("workload.start_users must be > 0 (got: %d)", c.Workload.StartUsers)
 	}
+	if (c.Workload.Type == "soak" || c.Workload.Type == "constant") && c.Workload.MaxUsers == 0 {
+		c.Workload.MaxUsers = c.Workload.StartUsers
+	}
 	if c.Workload.MaxUsers < c.Workload.StartUsers {
 		return fmt.Errorf("workload.max_users (%d) cannot be less than start_users (%d)", c.Workload.MaxUsers, c.Workload.StartUsers)
 	}
-	if c.Workload.Step <= 0 {
+	if c.Workload.Type == "step-ramp" && c.Workload.Step <= 0 {
 		return fmt.Errorf("workload.step must be > 0 (got: %d)", c.Workload.Step)
+	} else if c.Workload.Step <= 0 {
+		c.Workload.Step = 1
+	}
+
+	if (c.Workload.Type == "soak" || c.Workload.Type == "constant") && c.Workload.Duration <= 0 {
+		if c.Workload.StepDuration > 0 {
+			c.Workload.Duration = c.Workload.StepDuration * 5
+		} else {
+			c.Workload.Duration = 60 * time.Second
+		}
+	}
+
+	// Default or validate Pacing
+	if c.Workload.Pacing.ThinkTimeMin < 0 || c.Workload.Pacing.ThinkTimeMax < 0 {
+		return fmt.Errorf("workload.pacing think times must be non-negative")
+	}
+	if c.Workload.Pacing.ThinkTimeMin > c.Workload.Pacing.ThinkTimeMax && c.Workload.Pacing.ThinkTimeMax > 0 {
+		return fmt.Errorf("workload.pacing.think_time_min (%v) cannot be greater than think_time_max (%v)",
+			c.Workload.Pacing.ThinkTimeMin, c.Workload.Pacing.ThinkTimeMax)
+	}
+	if c.Workload.Pacing.ThinkTimeMin == 0 && c.Workload.Pacing.ThinkTimeMax == 0 {
+		c.Workload.Pacing.ThinkTimeMin = 200 * time.Millisecond
+		c.Workload.Pacing.ThinkTimeMax = 800 * time.Millisecond
+	} else if c.Workload.Pacing.ThinkTimeMax == 0 {
+		c.Workload.Pacing.ThinkTimeMax = c.Workload.Pacing.ThinkTimeMin
 	}
 
 	// Validate Thresholds
-	if c.Thresholds.MaxCPUPercent <= 0 || c.Thresholds.MaxCPUPercent > 100 {
+	if c.Thresholds.MaxCPUPercent <= 0 {
+		c.Thresholds.MaxCPUPercent = 85.0 // default 85% CPU saturation threshold
+	} else if c.Thresholds.MaxCPUPercent > 100 {
 		return fmt.Errorf("thresholds.max_cpu_percent must be between 1 and 100")
 	}
-	if c.Thresholds.MaxMemoryPercent <= 0 || c.Thresholds.MaxMemoryPercent > 100 {
+
+	if c.Thresholds.MaxMemoryPercent <= 0 {
+		c.Thresholds.MaxMemoryPercent = 80.0 // default 80% RAM saturation threshold
+	} else if c.Thresholds.MaxMemoryPercent > 100 {
 		return fmt.Errorf("thresholds.max_memory_percent must be between 1 and 100")
 	}
+
 	if c.Thresholds.MaxP95LatencyMs <= 0 {
 		return fmt.Errorf("thresholds.max_p95_latency_ms must be > 0")
+	}
+	if c.Thresholds.MaxCPUThrottlePercent <= 0 {
+		c.Thresholds.MaxCPUThrottlePercent = 15.0 // default 15% throttle limit
 	}
 
 	// Validate Scenarios

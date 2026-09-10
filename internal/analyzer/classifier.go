@@ -27,9 +27,9 @@ type BottleneckReport struct {
 
 // StateSnapshot captures system telemetry at the moment of evaluation
 type StateSnapshot struct {
-	LoadMetrics load.StageMetrics
-	APIMetrics  runtime.ContainerMetrics
-	PGMetrics   *monitor.PostgresMetrics
+	LoadMetrics  load.StageMetrics
+	APIMetrics   runtime.ContainerMetrics
+	PGMetrics    *monitor.PostgresMetrics
 	RedisMetrics *monitor.RedisMetrics
 }
 

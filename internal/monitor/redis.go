@@ -19,11 +19,13 @@ type RedisMetrics struct {
 	EvictedKeys      int64
 }
 
-// RedisMonitor inspects Redis system stats via standard client INFO commands
+// RedisMonitor inspects Redis system stats via standard client INFO commands.
 type RedisMonitor struct {
 	addr   string
 	client *redis.Client
 }
+
+var _ DatabaseMonitor[*RedisMetrics] = (*RedisMonitor)(nil)
 
 // NewRedisMonitor establishes a connection to Redis
 func NewRedisMonitor(addr string) (*RedisMonitor, error) {
@@ -49,16 +51,17 @@ func NewRedisMonitor(addr string) (*RedisMonitor, error) {
 	}, nil
 }
 
-// Close terminates the Redis client
-func (r *RedisMonitor) Close() {
-	if r.client != nil {
-		_ = r.client.Close()
+// Close terminates the Redis client (implements DatabaseMonitor)
+func (r *RedisMonitor) Close(ctx context.Context) error {
+	if r != nil && r.client != nil {
+		return r.client.Close()
 	}
+	return nil
 }
 
 // Harvest parses INFO stats and INFO memory
 func (r *RedisMonitor) Harvest(ctx context.Context) (*RedisMetrics, error) {
-	if r.client == nil {
+	if r == nil || r.client == nil {
 		return nil, nil
 	}
 

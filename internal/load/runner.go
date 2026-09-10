@@ -32,7 +32,14 @@ type StageMetrics struct {
 	ErrorPercent  float64
 }
 
-// Runner drives concurrent virtual user traffic
+// StageRunner defines the standard contract for workload engines (Native Go worker pool or Headless k6).
+type StageRunner interface {
+	RunStage(ctx context.Context, vus int, duration time.Duration) (*StageMetrics, error)
+}
+
+var _ StageRunner = (*Runner)(nil)
+
+// Runner drives concurrent virtual user traffic.
 type Runner struct {
 	cfg        *config.Config
 	transport  *http.Transport
@@ -47,7 +54,7 @@ func NewRunner(cfg *config.Config) *Runner {
 		MaxIdleConns:        2000,
 		MaxIdleConnsPerHost: 1000,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: false,
+		DisableCompression:  false,
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 	}
 
@@ -75,12 +82,12 @@ func (r *Runner) Reset() {
 	}
 }
 
-// RunStage executes a load stage with N virtual users for a given duration
+// RunStage executes a load stage with N virtual users for a given duration.
 func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) (*StageMetrics, error) {
 	var (
-		totalReqs        int64
-		successes        int64
-		errorCount       int64
+		totalReqs        atomic.Int64
+		successes        atomic.Int64
+		errorCount       atomic.Int64
 		mu               sync.Mutex
 		latencies        []float64
 		stageCtx, cancel = context.WithTimeout(ctx, duration)
@@ -93,7 +100,15 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 	for i := 0; i < vus; i++ {
 		wg.Add(1)
 		go func() {
-			defer wg.Done()
+			var localLatencies []float64
+			defer func() {
+				if len(localLatencies) > 0 {
+					mu.Lock()
+					latencies = append(latencies, localLatencies...)
+					mu.Unlock()
+				}
+				wg.Done()
+			}()
 
 			for {
 				select {
@@ -105,23 +120,30 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 					err := r.executeScenario(stageCtx)
 					latency := float64(time.Since(start).Microseconds()) / 1000.0 // ms
 
-					atomic.AddInt64(&totalReqs, 1)
-
-					mu.Lock()
-					latencies = append(latencies, latency)
-					mu.Unlock()
+					totalReqs.Add(1)
+					localLatencies = append(localLatencies, latency)
 
 					if err != nil {
 						// Only count real network or server errors, not the stage timer expiring
 						if stageCtx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-							atomic.AddInt64(&errorCount, 1)
+							errorCount.Add(1)
 						}
 					} else {
-						atomic.AddInt64(&successes, 1)
+						successes.Add(1)
 					}
 
-					// Pacing / think time (simulate real human delays)
-					time.Sleep(time.Duration(20+rand.Intn(30)) * time.Millisecond)
+					// Pacing / think time (simulate real human delays using configured thresholds)
+					minThink := r.cfg.Workload.Pacing.ThinkTimeMin
+					maxThink := r.cfg.Workload.Pacing.ThinkTimeMax
+					if minThink <= 0 {
+						minThink = 20 * time.Millisecond
+					}
+					if maxThink <= minThink {
+						time.Sleep(minThink)
+					} else {
+						delta := maxThink - minThink
+						time.Sleep(minThink + time.Duration(rand.Int63n(int64(delta))))
+					}
 				}
 			}
 		}()
@@ -132,11 +154,18 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 
 	// Compute statistics
 	seconds := duration.Seconds()
-	rps := float64(totalReqs) / seconds
+	tot := totalReqs.Load()
+	errs := errorCount.Load()
+	succ := successes.Load()
+
+	var rps float64
+	if seconds > 0 {
+		rps = float64(tot) / seconds
+	}
 
 	var errPercent float64
-	if totalReqs > 0 {
-		errPercent = (float64(errorCount) / float64(totalReqs)) * 100.0
+	if tot > 0 {
+		errPercent = (float64(errs) / float64(tot)) * 100.0
 	}
 
 	p50, p90, p95, p99 := calculatePercentiles(latencies)
@@ -144,9 +173,9 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 	return &StageMetrics{
 		VUs:           vus,
 		Duration:      duration,
-		TotalRequests: totalReqs,
-		SuccessCount:  successes,
-		ErrorCount:    errorCount,
+		TotalRequests: tot,
+		SuccessCount:  succ,
+		ErrorCount:    errs,
 		RPS:           rps,
 		P50Ms:         p50,
 		P90Ms:         p90,
@@ -176,56 +205,72 @@ func (r *Runner) executeScenario(ctx context.Context) error {
 
 	// Pick scenario based on weight distribution
 	scenario := r.selector.Pick()
+	session := make(map[string]string)
 
-	// Execute scenario flow steps sequentially
+	// Execute scenario flow steps sequentially with dynamic session context
 	for _, step := range scenario.Steps {
-		method, path, headers, bodyReader := step.ResolveExecution()
+		stepErr := func() error {
+			method, path, headers, bodyReader := step.ResolveExecution(session)
 
-		fullURL := r.baseURL
-		if path != "" {
-			if strings.HasPrefix(path, "/") {
-				fullURL += path
-			} else {
-				fullURL += "/" + path
+			fullURL := r.baseURL
+			if path != "" {
+				if strings.HasPrefix(path, "/") {
+					fullURL += path
+				} else {
+					fullURL += "/" + path
+				}
 			}
-		}
 
-		req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-		if err != nil {
-			return err
-		}
+			req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+			if err != nil {
+				return err
+			}
 
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
 
-		resp, err := r.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
+			resp, err := r.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
 
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+			// Read response body up to 1MB to prevent OOM while allowing JSON token extraction
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 
-		if resp.StatusCode >= 500 {
-			return fmt.Errorf("step %s %s error: %d", step.Method, step.Path, resp.StatusCode)
+			if resp.StatusCode >= 500 {
+				return fmt.Errorf("step %s %s error: %d", step.Method, step.Path, resp.StatusCode)
+			}
+
+			// Extract response variables for next steps
+			ExtractResponseContext(resp.StatusCode, resp.Header, bodyBytes, session)
+			return nil
+		}()
+
+		if stepErr != nil {
+			return stepErr
 		}
 	}
 
 	return nil
 }
 
-func calculatePercentiles(latencies []float64) (p50, p90, p95, p99 float64) {
-	if len(latencies) == 0 {
+func calculatePercentiles(latencies []float64) (float64, float64, float64, float64) {
+	n := len(latencies)
+	if n == 0 {
 		return 0, 0, 0, 0
 	}
 
 	sort.Float64s(latencies)
-	n := len(latencies)
 
-	p50 = latencies[int(float64(n)*0.50)]
-	p90 = latencies[int(float64(n)*0.90)]
-	p95 = latencies[int(float64(n)*0.95)]
-	p99 = latencies[int(float64(n)*0.99)]
-	return
+	pct := func(p float64) float64 {
+		idx := int(float64(n) * p)
+		if idx >= n {
+			idx = n - 1
+		}
+		return latencies[idx]
+	}
+
+	return pct(0.50), pct(0.90), pct(0.95), pct(0.99)
 }

@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -138,7 +137,7 @@ func (s *Sentinel) DetectKneePoint(vus []int, p95s []float64) KneePointInfo {
 		deltaP95 := p95s[i] - p95s[i-1]
 
 		// Inflection criteria: slope surges by 3.0x AND latency delta exceeds 5.0ms
-		if currentSlope >= (baselineSlope * 3.0) && deltaP95 >= 5.0 {
+		if currentSlope >= (baselineSlope*3.0) && deltaP95 >= 5.0 {
 			return KneePointInfo{
 				Detected:        true,
 				InflectionStage: i + 1,
@@ -154,16 +153,6 @@ func (s *Sentinel) DetectKneePoint(vus []int, p95s []float64) KneePointInfo {
 	return KneePointInfo{Detected: false}
 }
 
-// getProcessCPUTime returns total user + system CPU duration consumed by this process
-func getProcessCPUTime() time.Duration {
-	var rusage syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
-		return 0
-	}
-	user := time.Duration(rusage.Utime.Sec)*time.Second + time.Duration(rusage.Utime.Usec)*time.Microsecond
-	sys := time.Duration(rusage.Stime.Sec)*time.Second + time.Duration(rusage.Stime.Usec)*time.Microsecond
-	return user + sys
-}
 
 // readSocketStats extracts active and TIME_WAIT socket counts from /proc/net/sockstat
 func readSocketStats() (timeWait int, inUse int) {

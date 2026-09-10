@@ -1,13 +1,16 @@
 # Binaries
 bin/
 dist/
-capacitylab
+/capacitylab
 
 # Test artifacts & generated reports
 *.html
 *.json
 !capacitylab.example.yaml
 .capacitylab/
+
+# Local instance configuration (generated via 'capacitylab init')
+/capacitylab.yaml
 
 # OS / IDE
 .DS_Store

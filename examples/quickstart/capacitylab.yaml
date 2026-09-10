@@ -1,0 +1,61 @@
+version: "1"
+
+application:
+  name: "quickstart-api"
+  url: "http://localhost:8080"
+
+services:
+  api:
+    container: "quickstart-api"
+
+scenarios:
+  - name: "Authenticated User Journey"
+    weight: 100
+    steps:
+      - name: "Health Check"
+        method: "GET"
+        path: "/health"
+        expect:
+          status: 200
+
+      - name: "User Login"
+        method: "POST"
+        path: "/api/v1/auth/login"
+        headers:
+          Content-Type: "application/json"
+        body: '{"username":"testuser","password":"securepassword"}'
+        extract:
+          auth_token: "token"
+        expect:
+          status: 200
+
+      - name: "Create Item"
+        method: "POST"
+        path: "/api/v1/items"
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer ${auth_token}"
+        body: '{"name":"Sample Item {{random_int:100:999}}"}'
+        expect:
+          status: 201
+
+      - name: "List Items"
+        method: "GET"
+        path: "/api/v1/items"
+        headers:
+          Authorization: "Bearer ${auth_token}"
+        expect:
+          status: 200
+
+workload:
+  type: "step-ramp"
+  start_users: 10
+  max_users: 60
+  step: 10
+  pacing_ms: 200
+
+thresholds:
+  max_p95_latency_ms: 400
+  max_error_rate_pct: 1.0
+  max_cpu_percent: 85.0
+  max_memory_percent: 80.0

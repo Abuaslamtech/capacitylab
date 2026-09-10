@@ -11,12 +11,12 @@ import (
 var rootCmd = &cobra.Command{
 	Use:   "capacitylab",
 	Short: "CapacityLab is a developer infrastructure & capacity planning tool",
-	Long: `CapacityLab runs your backend locally under controlled Docker cgroup resources,
-    simulates realistic multi-step user workloads, detects saturation points, 
-    and estimates the exact production infrastructure required for your application.`,
+	Long: BrandBanner("Autonomous Infrastructure & Capacity Sizing Engine") + `
+  Simulates realistic multi-step user workloads, detects saturation knees,
+  and estimates exact production cloud infrastructure for your application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// If user types just 'capacitylab', show the help menu
-		cmd.Help()
+		_ = cmd.Help()
 	},
 }
 

@@ -17,47 +17,76 @@ var validateCmd = &cobra.Command{
 	Short: "Validate your capacitylab.yaml configuration and check Docker connectivity",
 	Long:  `Loads and validates the syntax of capacitylab.yaml, then checks Docker daemon connectivity and container health.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("🔍 Validating configuration: %s\n\n", configPath)
+		fmt.Fprint(os.Stdout, BrandBanner("Configuration Validator"))
+		fmt.Printf("  %s %s\n\n", Dim("Config File:"), Cyan(configPath))
 
 		cfg, err := config.Load(configPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Validation failed:\n   %v\n\n", err)
+			fmt.Fprintf(os.Stderr, "  %s %s\n     %v\n\n", IconError(), Bold(Red("Validation Failed")), err)
 			os.Exit(1)
 		}
 
 		// Print clean summary of validated settings
-		fmt.Printf("  ✓ Version:               %s\n", cfg.Version)
-		fmt.Printf("  ✓ Application:           %s (%s)\n", cfg.Application.Name, cfg.Application.URL)
-		fmt.Printf("  ✓ Workload Ramping:      %d ➔ %d users (step: %d)\n",
-			cfg.Workload.StartUsers, cfg.Workload.MaxUsers, cfg.Workload.Step)
-		fmt.Printf("  ✓ Stage Durations:       warmup: %v, step: %v\n",
-			cfg.Workload.WarmupDuration, cfg.Workload.StepDuration)
-		fmt.Printf("  ✓ SLA Thresholds:        CPU ≤ %.0f%%, Mem ≤ %.0f%%, p95 ≤ %.0fms, Errors ≤ %.1f%%\n",
+		fmt.Printf("  %s %-20s %s\n", IconSuccess(), Dim("Version"), Bold(cfg.Version))
+		fmt.Printf("  %s %-20s %s %s\n", IconSuccess(), Dim("Application"), Bold(cfg.Application.Name), Cyan("("+cfg.Application.URL+")"))
+		fmt.Printf("  %s %-20s %d %s %d users %s\n", IconSuccess(), Dim("Workload Ramping"),
+			cfg.Workload.StartUsers, IconArrow(), cfg.Workload.MaxUsers, Dim(fmt.Sprintf("(step: +%d)", cfg.Workload.Step)))
+		fmt.Printf("  %s %-20s warmup: %s, step: %s\n", IconSuccess(), Dim("Stage Durations"),
+			Cyan(cfg.Workload.WarmupDuration.String()), Cyan(cfg.Workload.StepDuration.String()))
+		fmt.Printf("  %s %-20s CPU ≤ %.0f%%, Mem ≤ %.0f%%, p95 ≤ %.0fms, Errors ≤ %.1f%%\n",
+			IconSuccess(), Dim("SLA Thresholds"),
 			cfg.Thresholds.MaxCPUPercent, cfg.Thresholds.MaxMemoryPercent,
 			cfg.Thresholds.MaxP95LatencyMs, cfg.Thresholds.MaxErrorRatePercent)
-		fmt.Printf("  ✓ Scenarios:             %d defined (total weight: 100%%)\n\n", len(cfg.Scenarios))
+		fmt.Printf("  %s %-20s %d defined %s\n\n", IconSuccess(), Dim("Scenarios"),
+			len(cfg.Scenarios), Dim("(total weight: 100%)"))
 
-		// Check Docker daemon connection
-		fmt.Println("🐳 Checking Docker Environment...")
+		// Check Docker daemon connection (optional for hosted APIs)
+		isLocalDocker := cfg.Application.Startup.ComposeFile != "" || cfg.Services.API.Container != ""
 		dockerClient, err := runtime.NewClient()
 		if err != nil {
-			fmt.Printf("  ⚠️  Docker Daemon: %v\n", err)
-			fmt.Println("\nConfiguration syntax is valid, but Docker is not currently reachable.")
-			return
-		}
-		fmt.Println("  ✓ Docker Daemon is active and connected")
-		ctx := context.Background()
-		if cfg.Services.API.Container != "" {
-			running, status, err := dockerClient.ContainerStatus(ctx, cfg.Services.API.Container)
-			if err != nil {
-				fmt.Printf("  ⚠️  API Container ('%s'): not found on local host\n", cfg.Services.API.Container)
+			if isLocalDocker {
+				fmt.Printf("  %s %s: %v\n", IconWarning(), Bold(Yellow("Docker Daemon")), err)
+				fmt.Println("\n  Configuration syntax is valid, but Docker is required for local container profiling.")
 			} else {
-				fmt.Printf("  ✓ API Container ('%s'): %s (running: %t)\n", cfg.Services.API.Container, status, running)
+				fmt.Printf("  %s %s %s\n", IconBullet(), Dim("Docker Engine"), Dim("(skipped — testing hosted cloud target)"))
+			}
+		} else {
+			ctx := context.Background()
+			if envInfo, err := dockerClient.DetectEnvironment(ctx); err == nil {
+				hostType := "Native Linux"
+				if envInfo.IsDockerDesktop {
+					hostType = "Docker Desktop VM"
+				} else if envInfo.IsWSL2 {
+					hostType = "WSL2 Virtualized"
+				}
+				fmt.Printf("  %s %-20s %s %s\n", IconSuccess(), Dim("Host Topology"),
+					Bold(hostType), Dim(fmt.Sprintf("(Daemon RAM: %.1f GB, Cores: %d)", envInfo.TotalMemMB/1024, envInfo.CPUs)))
+				if envInfo.Warning != "" {
+					fmt.Printf("  %s %s\n", IconWarning(), Yellow(envInfo.Warning))
+				}
+			}
+
+			if cfg.Application.Startup.ComposeFile != "" {
+				if _, err := os.Stat(cfg.Application.Startup.ComposeFile); err == nil {
+					fmt.Printf("  %s %-20s %s\n", IconSuccess(), Dim("Compose File"), Green(cfg.Application.Startup.ComposeFile))
+				} else {
+					fmt.Printf("  %s %-20s %s %s\n", IconWarning(), Dim("Compose File"), Yellow(cfg.Application.Startup.ComposeFile), Dim("(not found)"))
+				}
+			}
+
+			if cfg.Services.API.Container != "" {
+				running, status, err := dockerClient.ContainerStatus(ctx, cfg.Services.API.Container)
+				if err != nil {
+					fmt.Printf("  %s %-20s %s %s\n", IconWarning(), Dim("API Container"), Yellow(cfg.Services.API.Container), Dim("(not found on local host)"))
+				} else {
+					fmt.Printf("  %s %-20s %s %s\n", IconSuccess(), Dim("API Container"), Bold(cfg.Services.API.Container), Green(fmt.Sprintf("[%s]", status)))
+					_ = running
+				}
 			}
 		}
 
-		// Check if configured containers exist
-		fmt.Println("\n🎉 Ready for benchmark runs!")
+		fmt.Printf("\n  %s %s\n", IconSuccess(), Bold(Green("Configuration is valid and ready to run!")))
+		fmt.Printf("     Execute: %s\n\n", Bold(BrightCyan("capacitylab run --open")))
 	},
 }
 
