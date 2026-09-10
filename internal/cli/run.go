@@ -13,6 +13,7 @@ import (
 	"github.com/Abuaslamtech/capacitylab/internal/monitor"
 	"github.com/Abuaslamtech/capacitylab/internal/report"
 	"github.com/Abuaslamtech/capacitylab/internal/runtime"
+	"github.com/Abuaslamtech/capacitylab/internal/sentinel"
 	"github.com/spf13/cobra"
 )
 
@@ -159,14 +160,21 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		// 2. Progressive Ramping Stages
 		currentUsers := cfg.Workload.StartUsers
 		classifier := analyzer.NewClassifier(cfg.Thresholds)
+		sent := sentinel.New()
 		var finalReport analyzer.BottleneckReport
 
 		stageStepDuration := 6 * time.Second
 
 		var (
-			maxObservedUsers = 0
-			breached         = false
-			recordedStages   []report.StageData
+			maxObservedUsers    = 0
+			breached            = false
+			recordedStages      []report.StageData
+			vusHistory          []int
+			p95History          []float64
+			allSentinelWarnings []string
+			peakRunnerCPU       float64
+			peakRunnerMem       float64
+			peakTimeWaitSockets int
 		)
 
 		stageNum := 1
@@ -185,6 +193,7 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 				baselineThrottled = baselineMetrics.ThrottledPeriods
 			}
 
+			guard := sent.StartStage()
 			sampleDone := make(chan bool)
 
 			go func() {
@@ -232,6 +241,23 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 
 			metrics, err := runner.RunStage(ctx, currentUsers, stageStepDuration)
 			close(sampleDone)
+			sentReport := guard.Finish()
+
+			if sentReport.Telemetry.RunnerCPUPercent > peakRunnerCPU {
+				peakRunnerCPU = sentReport.Telemetry.RunnerCPUPercent
+			}
+			if sentReport.Telemetry.RunnerMemMB > peakRunnerMem {
+				peakRunnerMem = sentReport.Telemetry.RunnerMemMB
+			}
+			if sentReport.Telemetry.TimeWaitSockets > peakTimeWaitSockets {
+				peakTimeWaitSockets = sentReport.Telemetry.TimeWaitSockets
+			}
+			if sentReport.HasWarning {
+				allSentinelWarnings = append(allSentinelWarnings, sentReport.Warnings...)
+				for _, w := range sentReport.Warnings {
+					fmt.Printf("   ⚠️  SENTINEL: %s\n", w)
+				}
+			}
 
 			if err != nil {
 				fmt.Printf("   ❌ Stage error: %v\n", err)
@@ -264,6 +290,14 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 
 			fmt.Printf("   📊 RPS: %-6.0f | p95: %-5.1fms | API CPU: %-4.1f%% | RAM: %-5.1fMB | Errors: %.1f%%\n",
 				metrics.RPS, metrics.P95Ms, peakCPU, peakMem, metrics.ErrorPercent)
+
+			vusHistory = append(vusHistory, currentUsers)
+			p95History = append(p95History, metrics.P95Ms)
+			knee := sent.DetectKneePoint(vusHistory, p95History)
+			if knee.Detected && knee.InflectionVUs == currentUsers {
+				fmt.Printf("   📈 KNEE-POINT: Early queueing delay detected (%.1fx slope surge at %d VUs)\n",
+					knee.CurrentSlope/knee.BaselineSlope, knee.InflectionVUs)
+			}
 
 			// 3. Evaluate Cross-Service Root-Cause Classifier
 			snap := analyzer.StateSnapshot{
@@ -345,6 +379,16 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			}
 		}
 
+		fmt.Println("\n🛡️  Local Host Sentinel Integrity:")
+		if len(allSentinelWarnings) == 0 {
+			fmt.Printf("  ✓ Zero host starvation (Peak Runner CPU: %.1f%%, RAM: %.1f MB, TIME_WAIT Sockets: %d)\n",
+				peakRunnerCPU, peakRunnerMem, peakTimeWaitSockets)
+		} else {
+			for _, w := range allSentinelWarnings {
+				fmt.Printf("  ⚠️  %s\n", w)
+			}
+		}
+
 		fmt.Println("\nRecommended Sizing for Current Load:")
 		fmt.Printf("  • %s Container: 1.0 vCPU, 512 MB RAM\n", containerName)
 		fmt.Println("═════════════════════════════════════════════════════════════")
@@ -354,12 +398,20 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 		for _, sec := range finalReport.Secondary {
 			secondaryList = append(secondaryList, fmt.Sprintf("%s: %s (Fix: %s)", sec.Component, sec.Summary, sec.Remediation))
 		}
+		for _, w := range allSentinelWarnings {
+			secondaryList = append(secondaryList, "Sentinel: "+w)
+		}
 
 		bottleneckSummary := finalReport.Primary.Summary
 		bottleneckFix := finalReport.Primary.Remediation
 		if !breached {
 			bottleneckSummary = "None detected within tested range"
 			bottleneckFix = "System is operating comfortably within current hardware parameters."
+		}
+
+		nonLimitingList := append([]string{}, finalReport.NonLimiting...)
+		if len(allSentinelWarnings) == 0 && peakTimeWaitSockets >= 0 {
+			nonLimitingList = append(nonLimitingList, fmt.Sprintf("Sentinel Verified (Runner CPU: %.1f%%, TIME_WAIT: %d)", peakRunnerCPU, peakTimeWaitSockets))
 		}
 
 		// Generate HTML Report
@@ -371,7 +423,7 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			bottleneckSummary,
 			bottleneckFix,
 			secondaryList,
-			finalReport.NonLimiting,
+			nonLimitingList,
 			cfg.Workload.MaxUsers,
 			maxObservedUsers,
 			sustainableCapacity,
