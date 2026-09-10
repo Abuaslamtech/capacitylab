@@ -4,7 +4,7 @@ version: "1"
 # 1. Target Application Definition
 application:
   name: my-backend
-  url: http://localhost:3000
+  url: http://127.0.0.1:3000
   startup:
     compose_file: ./docker-compose.yml
     wait_for_health: true
@@ -15,17 +15,17 @@ services:
   api:
     container: my-api-container
     test_matrix:
-      cpu: ["0.5", "1.0", "2.0"]
-      memory: ["512MB", "1GB", "2GB"]
+      cpu: ["0.5", "1.0"]
+      memory: ["256MB", "512MB"]
 
-    postgres:
-      container: my-postgres-container
-      dsn: "postgres://postgres:postgres@localhost:5432/my_db?sslmode=disable"
-      max_connections: 100
+  postgres:
+    container: my-postgres-container
+    dsn: ""
+    max_connections: 100
 
-    redis:
-      container: my-redis-container
-      addr: "localhost:6379"
+  redis:
+    container: my-redis-container
+    addr: ""
 
 # 3. Workload Step Ramping
 workload:

@@ -86,21 +86,16 @@ func (d *DockerClient) ContainerStatus(ctx context.Context, containerName string
 
 // UpdateResources dynamically adjusts CPU and RAM limits on a running container via cgroups
 func (d *DockerClient) UpdateResources(ctx context.Context, containerName string, cpus float64, memoryMB int64) error {
-	// In Linux cgroups:
-	// CPUPeriod is the scheduling window (default 100,000 microseconds = 100ms)
-	// CPUQuota is the allowed time in that window.
-	// 0.5 CPU = 50,000 quota
-	// 1.0 CPU = 100,000 quota
-	// 2.0 CPU = 200,000 quota
-	cpuPeriod := int64(100000)
-	cpuQuota := int64(cpus * float64(cpuPeriod))
+	nanoCPUs := int64(cpus * 1e9)
 	memoryBytes := memoryMB * 1024 * 1024
+	// In Docker, MemorySwap must be >= Memory to satisfy the kernel cgroup constraint
+	memorySwapBytes := memoryBytes * 2
 
 	updateConfig := container.UpdateConfig{
 		Resources: container.Resources{
-			CPUPeriod: cpuPeriod,
-			CPUQuota:  cpuQuota,
-			Memory:    memoryBytes,
+			NanoCPUs:   nanoCPUs,
+			Memory:     memoryBytes,
+			MemorySwap: memorySwapBytes,
 		},
 	}
 

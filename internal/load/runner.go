@@ -3,7 +3,9 @@ package load
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"sort"
@@ -32,6 +34,7 @@ type StageMetrics struct {
 // Runner drives concurrent virtual user traffic
 type Runner struct {
 	cfg        *config.Config
+	transport  *http.Transport
 	httpClient *http.Client
 }
 
@@ -52,7 +55,15 @@ func NewRunner(cfg *config.Config) *Runner {
 
 	return &Runner{
 		cfg:        cfg,
+		transport:  transport,
 		httpClient: client,
+	}
+}
+
+// Reset clears idle connections from the pool
+func (r *Runner) Reset() {
+	if r.transport != nil {
+		r.transport.CloseIdleConnections()
 	}
 }
 
@@ -61,7 +72,7 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 	var (
 		totalReqs        int64
 		successes        int64
-		errors           int64
+		errorCount       int64
 		mu               sync.Mutex
 		latencies        []float64
 		stageCtx, cancel = context.WithTimeout(ctx, duration)
@@ -93,7 +104,10 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 					mu.Unlock()
 
 					if err != nil {
-						atomic.AddInt64(&errors, 1)
+						// Only count real network or server errors, not the stage timer expiring
+						if stageCtx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+							atomic.AddInt64(&errorCount, 1)
+						}
 					} else {
 						atomic.AddInt64(&successes, 1)
 					}
@@ -114,7 +128,7 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 
 	var errPercent float64
 	if totalReqs > 0 {
-		errPercent = (float64(errors) / float64(totalReqs)) * 100.0
+		errPercent = (float64(errorCount) / float64(totalReqs)) * 100.0
 	}
 
 	p50, p90, p95, p99 := calculatePercentiles(latencies)
@@ -124,7 +138,7 @@ func (r *Runner) RunStage(ctx context.Context, vus int, duration time.Duration) 
 		Duration:      duration,
 		TotalRequests: totalReqs,
 		SuccessCount:  successes,
-		ErrorCount:    errors,
+		ErrorCount:    errorCount,
 		RPS:           rps,
 		P50Ms:         p50,
 		P90Ms:         p90,
@@ -146,6 +160,7 @@ func (r *Runner) executeScenario(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 500 {
 		return fmt.Errorf("server error: %d", resp.StatusCode)
