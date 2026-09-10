@@ -9,6 +9,7 @@ import (
 	"github.com/Abuaslamtech/capacitylab/internal/analyzer"
 	"github.com/Abuaslamtech/capacitylab/internal/config"
 	"github.com/Abuaslamtech/capacitylab/internal/engine"
+	"github.com/Abuaslamtech/capacitylab/internal/history"
 	"github.com/Abuaslamtech/capacitylab/internal/load"
 	"github.com/Abuaslamtech/capacitylab/internal/monitor"
 	"github.com/Abuaslamtech/capacitylab/internal/report"
@@ -438,6 +439,46 @@ simultaneously scraping container CPU and memory metrics to detect the saturatio
 			if openBrowser {
 				fmt.Println("🌐 Opening report in your default browser...")
 				_ = report.OpenInBrowser(outputReport)
+			}
+		}
+
+		// 5. Persist run snapshot to ~/.capacitylab/history/
+		var peakRPS float64
+		var p95AtPeak float64
+		for _, s := range recordedStages {
+			if s.RPS > peakRPS {
+				peakRPS = s.RPS
+				p95AtPeak = s.P95Ms
+			}
+		}
+
+		latestPrev, _, _ := history.GetLatestTwoRuns(cfg.Application.Name)
+
+		rec := history.RunRecord{
+			Timestamp:         time.Now(),
+			AppName:           cfg.Application.Name,
+			TargetURL:         cfg.Application.URL,
+			TargetVUs:         cfg.Workload.MaxUsers,
+			MaxObservedVUs:    maxObservedUsers,
+			SustainableVUs:    sustainableCapacity,
+			PeakRPS:           peakRPS,
+			P95LatencyMs:      p95AtPeak,
+			PrimaryBottleneck: finalReport.Primary.Component,
+			BottleneckFix:     finalReport.Primary.Remediation,
+			Stages:            recordedStages,
+		}
+
+		savedFile, err := history.SaveRun(rec)
+		if err == nil {
+			fmt.Printf("💾 Run snapshot saved: %s\n", savedFile)
+			if latestPrev != nil && latestPrev.SustainableVUs > 0 {
+				cmp := history.Compare(*latestPrev, rec)
+				if cmp.IsRegression {
+					fmt.Printf("⚠️  Historical Regression: %s\n", cmp.RegressionItem)
+				} else if cmp.CapacityDelta != 0 {
+					fmt.Printf("📈 Comparison to previous run: Sustainable capacity %+.1f%% (%d ➔ %d users)\n",
+						cmp.CapacityDelta, latestPrev.SustainableVUs, rec.SustainableVUs)
+				}
 			}
 		}
 	},
