@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -289,7 +290,7 @@ func RunInitWizard(in io.Reader, out io.Writer, configFile string) error {
 	appName := deriveAppName(chosenURL)
 	content := GenerateConfig(chosenType, chosenURL, appName, chosenJourney)
 
-	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+	if err := writeFileAtomic(configFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to create configuration file: %w", err)
 	}
 
@@ -312,6 +313,56 @@ func RunInitWizard(in io.Reader, out io.Writer, configFile string) error {
 func cmdFlagsChanged(name string) bool {
 	f := initCmd.Flags().Lookup(name)
 	return f != nil && f.Changed
+}
+
+// writeFileAtomic writes data to a temporary file in the target file's directory,
+// flushes it to disk, and atomically renames it to filename to prevent corruption
+// if the process is interrupted mid-write.
+func writeFileAtomic(filename string, data []byte, defaultPerm os.FileMode) error {
+	perm := defaultPerm
+	if fi, err := os.Stat(filename); err == nil {
+		perm = fi.Mode().Perm()
+	}
+
+	dir := filepath.Dir(filename)
+	base := filepath.Base(filename)
+
+	tmp, err := os.CreateTemp(dir, "."+base+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpName, filename); err != nil {
+		return err
+	}
+
+	tmpName = ""
+	return nil
 }
 
 var initCmd = &cobra.Command{
